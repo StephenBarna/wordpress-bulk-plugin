@@ -1,0 +1,259 @@
+# Cloning a Live WordPress Site to LocalWP
+
+A step-by-step runbook for pulling a copy of any live WordPress site down to your Mac for safe development and testing. Covers the full install, the migration plugin we use, and the **specific paywalls and upload limits we discovered** the hard way - so you don't have to re-debug them next time.
+
+> **Use this whenever you need a local working copy of a WordPress site** (any client, any host). The same approach works regardless of who's hosting the live site.
+
+## When to use this
+
+- Building a custom plugin or theme that needs the real site's data and settings
+- Testing a destructive operation (bulk page generation, content migration, plugin updates) safely
+- Debugging a production issue without touching production
+
+## What you end up with
+
+- A free WordPress dev environment running on your Mac at a `.local` URL (e.g. `http://earthhaul-test.local`)
+- An exact mirror of the live site: same database, same plugins, same theme, same uploads, same content
+- The ability to break things, experiment, and reset without consequence
+
+## Prerequisites
+
+- A Mac (Apple Silicon or Intel) with admin access
+- Admin access to the live WordPress site (you need to install a plugin on it)
+- Roughly 5-10 GB of free disk space
+
+## Step 1: Install LocalWP
+
+LocalWP (formerly Local by Flywheel) is a free, one-click WordPress installer for Mac.
+
+1. Go to **https://localwp.com/**
+2. Click **Download** -> choose **Mac (Apple Silicon)** or **Mac (Intel)** based on your machine
+3. Open the downloaded `.dmg`, drag **Local** into **Applications**
+4. Launch Local from Applications. First-time setup takes about 30 seconds
+
+## Step 2: Create a local empty site
+
+This empty site is a placeholder - you'll overwrite it with the live site's data in the next step.
+
+1. In Local, click **+** (bottom-left) -> **Create a new site**
+2. **Site name**: pick something meaningful, e.g. `earthhaul-test`. This becomes the URL.
+3. **Environment**: choose **Preferred** (PHP 8.x, nginx, MySQL 8)
+4. **WordPress username**: anything (e.g. `admin`)
+   **Password**: anything (e.g. `admin` - this is local only, it doesn't matter)
+   **Email**: anything
+5. Click **Add Site**
+6. Once the green dot appears, click **WP Admin** to verify the site loads
+
+The site lives on disk at:
+
+```text
+~/Local Sites/<site-name>/app/public/
+```
+
+## Step 3: Export the live site with All-in-One WP Migration
+
+We use the **All-in-One WP Migration** (AIWPM) plugin by ServMask. It works on any WordPress install and produces a single `.wpress` archive that contains the entire site.
+
+### On the live site (e.g. earthhaul.com)
+
+1. Log in to the live site's WP admin
+2. **Plugins -> Add New** -> search **"All-in-One WP Migration"** by **ServMask** -> **Install** -> **Activate**
+3. **All-in-One WP Migration -> Export -> Export To: File**
+4. Wait for the export to finish (1-10 minutes typical, longer for big sites)
+5. When the green download button appears, click it. Save the `.wpress` file somewhere you can find it (Downloads is fine).
+
+> **Heads-up**: the export file size can be 1 GB+ depending on uploads. Earthhaul's was 1.6 GB.
+
+## Step 4: Bypass the upload limits (this is where it gets annoying)
+
+AIWPM is free to install but **paywalls every easy import path** at certain file sizes. Plus, LocalWP itself has multiple upload limits stacked on top of each other. Below is the exact sequence to bypass everything without paying.
+
+### 4a. Install AIWPM on the local site
+
+In your local WP admin (`http://<site-name>.local/wp-admin/`):
+
+1. **Plugins -> Add New** -> search **"All-in-One WP Migration"** -> **Install** -> **Activate**
+
+### 4b. Bump PHP upload limits
+
+LocalWP's PHP defaults to a 300 MB upload cap, which is too small for most production sites.
+
+Open in your editor:
+
+```text
+~/Local Sites/<site-name>/conf/php/php.ini.hbs
+```
+
+Find these lines:
+
+```ini
+memory_limit = 256M
+post_max_size = 1000M
+...
+upload_max_filesize = 300M
+```
+
+Change them to:
+
+```ini
+memory_limit = 512M
+post_max_size = 2048M
+...
+upload_max_filesize = 2048M
+```
+
+> **Why 2048M and not higher?** PHP integer types are fine on 64-bit Macs, but staying at 2 GB avoids any 32-bit overflow edge cases. If your site is bigger than 2 GB, raise to 4096M.
+
+### 4c. Bump the **site** nginx upload limit
+
+Open:
+
+```text
+~/Local Sites/<site-name>/conf/nginx/nginx.conf.hbs
+```
+
+Find:
+
+```nginx
+client_max_body_size 1000M;
+```
+
+Change to:
+
+```nginx
+client_max_body_size 3000M;
+```
+
+### 4d. Bump the **router** nginx upload limit (this one is hidden)
+
+LocalWP runs **two** nginx processes:
+
+1. A per-site nginx (the one you just edited)
+2. A shared **"router" nginx** that sits in front of all sites and acts as a reverse proxy
+
+The router has its own `client_max_body_size` that defaults to 1000M. It will block your upload before it ever reaches the per-site nginx, so you have to raise this one too.
+
+The router config is at a runtime location (gets regenerated by LocalWP each time the app starts):
+
+```text
+~/Library/Application Support/Local/run/router/nginx/conf/nginx.conf
+```
+
+Change:
+
+```nginx
+client_max_body_size 1000M;
+```
+
+To:
+
+```nginx
+client_max_body_size 3000M;
+```
+
+Then **reload the router nginx** (don't restart LocalWP, that would regenerate the config back to 1000M):
+
+```bash
+# Find the router nginx master PID
+ps aux | grep "router/nginx" | grep -v grep
+
+# Reload it (replace 76271 with the actual master PID)
+kill -HUP 76271
+```
+
+> **Important caveat**: this router config gets regenerated whenever you fully **quit and reopen** LocalWP. Stopping/starting an individual site does NOT regenerate it. So plan to do your import in one sitting and don't quit Local mid-way.
+
+### 4e. Restart the local site
+
+In LocalWP: click the site -> **Stop site** -> wait for gray dot -> **Start site** -> wait for green dot. This picks up the per-site PHP + nginx changes.
+
+**Do not quit Local itself** - that would reset the router config from step 4d.
+
+## Step 5: Import the .wpress file
+
+1. Go to your local WP admin: **All-in-One WP Migration -> Import**
+2. Verify the page now says "Your host restricts uploads to 2 GB" (or similar large number) - confirms PHP is bumped
+3. **Hard-refresh the page**: `Cmd+Shift+R` (clears any cached JS values)
+4. Drag the `.wpress` file into the drop area
+5. Confirm the "this will overwrite" warning -> **Proceed**
+6. Wait for the upload bar to reach **100.00%**. For 1.6 GB this is fast on local.
+
+### When the bar hits 100%, server-side processing begins
+
+The progress bar will sit at 100% with a STOP IMPORT button visible for **5-15 minutes** while AIWPM does the real work invisibly:
+
+1. Extracts the archive
+2. Imports the database
+3. Copies files into `wp-content/`
+4. Rewrites site URLs from production domain to local domain
+5. Cleans up temp files
+
+**Do not close the tab. Do not click STOP IMPORT.** Just wait.
+
+You can verify it's working in another terminal:
+
+```bash
+ps aux | grep php-fpm | grep -v grep
+```
+
+If the worker process shows non-zero CPU usage and "R" (running) state, the import is in progress.
+
+## Step 6: Post-import cleanup
+
+Once the green "successfully imported" message appears:
+
+1. **Log out** of WP admin (the database now has the LIVE site's user accounts; your local `admin/admin` is gone)
+2. **Log back in** using the **live site's** WP admin username and password
+3. Go to **Settings -> Permalinks** -> click **Save Changes** (don't change anything; this rebuilds URL routing)
+4. Visit a known page like `http://<site-name>.local/locations/orlando-fl/` to verify content + layout match production
+
+If pages render correctly, you're done.
+
+## Common errors and fixes
+
+### `Your file exceeds the 300 MB upload limit set by your host`
+
+PHP `upload_max_filesize` is too low. Fix in step 4b.
+
+### `Your file exceeds the upload limit set by your host web server` (popup, after upload starts)
+
+This is HTTP **413 Request Entity Too Large** from nginx. One of your nginx layers still has a low `client_max_body_size`. Check both layers (steps 4c and 4d). The router (4d) is the one most often missed.
+
+### `"Restore" functionality is available in our Unlimited Extension`
+
+You're on the **Backups** page, which is now paywalled. **Use the Import page instead** (which is free) - that's what step 5 covers. Don't put your `.wpress` file in `wp-content/ai1wm-backups/` - just drag it into the regular Import drop zone after bumping the limits.
+
+### Plugin licenses showing as invalid after import
+
+Expected - paid plugins notice they're on a different domain now. For dev/testing this doesn't matter. If you need a paid plugin to fully work locally (e.g. Beaver Builder Pro to use specific modules), re-enter the license in that plugin's settings.
+
+### LocalWP regenerated my router config after I quit/reopened the app
+
+You'll have to re-do step 4d and reload nginx (`kill -HUP <router-master-pid>`) before doing another large import. Or just plan imports in one Local session.
+
+## File paths reference
+
+```text
+# Per-site config templates (persistent, you own them)
+~/Local Sites/<site-name>/conf/php/php.ini.hbs
+~/Local Sites/<site-name>/conf/nginx/nginx.conf.hbs
+
+# Runtime configs (regenerated from templates on site start)
+~/Library/Application Support/Local/run/<site-id>/conf/php/php.ini
+~/Library/Application Support/Local/run/<site-id>/conf/nginx/nginx.conf
+
+# Router config (regenerated only on full Local app start)
+~/Library/Application Support/Local/run/router/nginx/conf/nginx.conf
+
+# WordPress install
+~/Local Sites/<site-name>/app/public/
+
+# WordPress plugins
+~/Local Sites/<site-name>/app/public/wp-content/plugins/
+```
+
+## Faster path for next time
+
+If you're cloning a smaller site (under 300 MB), you can skip steps 4b-4d entirely - the defaults will work. Just install AIWPM on both sides, export, and import.
+
+For sites over 300 MB, the bump-limits dance above is unavoidable on LocalWP unless you're willing to pay for AIWPM's Unlimited Extension ($79).
