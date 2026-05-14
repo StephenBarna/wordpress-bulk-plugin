@@ -1,0 +1,17 @@
+# Layout dumps from the Inspect Page admin screen and dump-bb-layout.php
+# These contain real page content from the live site and are large.
+ehbp-layout-*.json
+docs/layout-dumps/
+
+# IDE / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# PHP / Composer (if we ever add it)
+/vendor/
+composer.lock
+
+# Logs
+*.log
