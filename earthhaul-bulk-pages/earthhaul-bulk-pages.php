@@ -35,6 +35,8 @@ require_once EHBP_PLUGIN_DIR . 'includes/services/class-image-pipeline.php';
 require_once EHBP_PLUGIN_DIR . 'includes/services/class-yoast-meta-engine.php';
 require_once EHBP_PLUGIN_DIR . 'includes/services/class-neighborhoods-csv-importer.php';
 require_once EHBP_PLUGIN_DIR . 'includes/services/class-neighborhoods-applier.php';
+require_once EHBP_PLUGIN_DIR . 'includes/services/class-neighborhoods-inline-substituter.php';
+require_once EHBP_PLUGIN_DIR . 'includes/services/class-job-storage.php';
 require_once EHBP_PLUGIN_DIR . 'includes/services/class-bulk-job-runner.php';
 require_once EHBP_PLUGIN_DIR . 'includes/admin/class-admin-menu.php';
 require_once EHBP_PLUGIN_DIR . 'includes/admin/class-settings-page.php';

@@ -292,7 +292,10 @@ final class Image_Pipeline {
 				continue;
 			}
 
-			$prompt = self::build_alt_prompt( $cand, $source_label, $target_label, $brand_voice );
+			// Pass the just-mutated candidate (which now carries
+			// suggested_filename) so the prompt anchors on the renamed
+			// file, not the source-city version.
+			$prompt = self::build_alt_prompt( $candidates[ $i ], $source_label, $target_label, $brand_voice );
 			$reply  = $client->chat( $prompt['user'], $prompt['system'], 30, 0.3 );
 
 			if ( $reply instanceof WP_Error ) {
@@ -440,12 +443,26 @@ final class Image_Pipeline {
 	}
 
 	private static function build_alt_prompt( array $cand, string $source_label, string $target_label, string $brand_voice ): array {
-		$current_alt = trim( (string) ( $cand['current_alt'] ?? '' ) );
-		$filename    = (string) ( $cand['source_filename'] ?? '' );
+		$current_alt        = trim( (string) ( $cand['current_alt'] ?? '' ) );
+		// Show the model the post-rename filename so the city it sees as a
+		// hint is the TARGET city, not the source. Falls back to source
+		// filename only if rename produced nothing (defensive).
+		$filename_hint      = (string) ( $cand['suggested_filename'] ?? '' );
+		if ( '' === $filename_hint ) {
+			$filename_hint = (string) ( $cand['source_filename'] ?? '' );
+		}
 		$module_slug = '';
 		if ( ! empty( $cand['references'] ) ) {
 			$module_slug = (string) ( $cand['references'][0]['module_slug'] ?? '' );
 		}
+
+		// Pre-localize the existing alt before it goes into the prompt:
+		// any whole-word source city / state token gets rewritten to the
+		// target. The model sees a structurally helpful "this image is
+		// a 20-yard dumpster in <Target>, FL" hint instead of a 50/50
+		// signal where two cities both look correct. Whole-word so we
+		// don't mangle compound identifiers like "Orlandowide".
+		$localized_alt = self::localize_text( $current_alt, $source_label, $target_label );
 
 		$system = "You write alt text for images on a roll-off dumpster rental company's location landing page.\n"
 			. "Hard rules:\n"
@@ -456,25 +473,62 @@ final class Image_Pipeline {
 			. "- BANNED hype words: 'amazing', 'best', 'top', 'efficient', 'professional', 'reliable'.\n"
 			. "- BANNED AI-tells: em-dashes, 'navigate', 'leverage', 'unlock', 'embark', 'realm', 'tapestry', 'meticulous', 'delve'.\n"
 			. "- The filename is just a HINT to what the image is. Don't invent use-cases (renovation, cleanup, demolition, project) unless they're literally visible in the photo.\n"
+			. "- LOCATION RULE: the ONLY city + state you may name is the TARGET city + state given below. If a hint (filename, existing alt) references any other city or state, IGNORE that and use the target. Never echo a non-target city back in your output.\n"
 			. "- Mention the target city + state at the end if it reads naturally. Skip the location if it makes the alt awkward.\n"
-			. "- ALWAYS use the two-letter U.S. state abbreviation (FL, CA, TX) - never the full state name. If the source/target label spells out the state, still output the abbreviation.\n"
+			. "- ALWAYS use the two-letter U.S. state abbreviation (FL, CA, TX) - never the full state name. If the target label spells out the state, still output the abbreviation.\n"
 			. "- Preferred shape: '<noun phrase describing what's in the photo> in <City>, <State>.'\n"
 			. "  Examples: '20-yard roll-off dumpster in Davenport, FL.'\n"
 			. "            'Yellow EarthHaul truck dropping a dumpster in Davenport, FL.'\n"
 			. "            'EarthHaul logo.' (no city if it adds nothing)";
 
 		$user = "Brand voice: " . ( '' === $brand_voice ? '(none specified)' : $brand_voice ) . "\n\n"
-			. "Source page city: {$source_label}\n"
-			. "Target page city: {$target_label}\n"
-			. "Image filename (subject hint, do not editorialize): {$filename}\n"
+			. "TARGET city + state (the ONLY location you may use): {$target_label}\n"
+			. "Image filename (subject hint, do not editorialize): {$filename_hint}\n"
 			. "Module type: {$module_slug}\n"
-			. "Existing alt text: " . ( '' === $current_alt ? '(empty)' : $current_alt ) . "\n\n"
+			. "Existing alt text (already pre-localized to the target city; use as a structural hint, do not copy verbatim): " . ( '' === $localized_alt ? '(empty)' : $localized_alt ) . "\n\n"
 			. "Write the alt text. Output ONLY the alt text, nothing else.";
 
 		return array(
 			'system' => $system,
 			'user'   => $user,
 		);
+	}
+
+	/**
+	 * Whole-word case-insensitive replace of source city/state tokens with
+	 * target city/state tokens. Used to pre-localize hint text before it's
+	 * shown to the model, so the prompt doesn't broadcast the source city
+	 * as one of two equally-valid choices.
+	 */
+	private static function localize_text( string $text, string $source_label, string $target_label ): string {
+		if ( '' === trim( $text ) ) {
+			return $text;
+		}
+		$src_city = self::extract_city( $source_label );
+		$tgt_city = self::extract_city( $target_label );
+		$src_state = self::extract_state( $source_label );
+		$tgt_state = self::extract_state( $target_label );
+
+		if ( '' !== $src_city && '' !== $tgt_city ) {
+			$text = preg_replace(
+				'/\b' . preg_quote( $src_city, '/' ) . '\b/i',
+				$tgt_city,
+				$text
+			) ?? $text;
+		}
+		if ( '' !== $src_state && '' !== $tgt_state ) {
+			$text = preg_replace(
+				'/\b' . preg_quote( $src_state, '/' ) . '\b/i',
+				$tgt_state,
+				$text
+			) ?? $text;
+		}
+		return $text;
+	}
+
+	private static function extract_state( string $label ): string {
+		$parts = explode( ',', $label );
+		return trim( (string) ( $parts[1] ?? '' ) );
 	}
 
 	private static function sanitize_alt( string $value ): string {
@@ -552,6 +606,14 @@ final class Image_Pipeline {
 
 		$meta = wp_generate_attachment_metadata( $new_id, $candidate_path );
 		wp_update_attachment_metadata( $new_id, $meta );
+
+		// Mark this attachment as plugin-sideloaded so the dashboard's
+		// cascade-delete and orphan-cleanup tooling can identify it
+		// later without ambiguity. _ehbp_source_attachment_id points at
+		// the original Orlando-side asset this was copied from, useful
+		// for debugging mis-renames or audits.
+		update_post_meta( (int) $new_id, '_ehbp_cloned_attachment', 1 );
+		update_post_meta( (int) $new_id, '_ehbp_source_attachment_id', (int) $source_id );
 
 		return (int) $new_id;
 	}

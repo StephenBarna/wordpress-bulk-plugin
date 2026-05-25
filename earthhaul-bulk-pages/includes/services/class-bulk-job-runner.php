@@ -66,7 +66,7 @@ final class Bulk_Job_Runner {
 			'edit_url'       => '',
 			'preview_url'    => '',
 			'title'          => '',
-			'neighborhoods'  => array( 'attempted' => false, 'ok' => false, 'modules' => 0, 'count' => 0, 'message' => '' ),
+			'neighborhoods'  => array( 'attempted' => false, 'ok' => false, 'modules' => 0, 'count' => 0, 'inline_fields' => 0, 'message' => '' ),
 			'text'           => array( 'attempted' => false, 'applied' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => array() ),
 			'images'         => array( 'attempted' => false, 'applied' => 0, 'failed' => 0, 'errors' => array() ),
 			'meta'           => array( 'attempted' => false, 'applied' => 0, 'failed' => 0 ),
@@ -112,6 +112,34 @@ final class Bulk_Job_Runner {
 		$source_label = (string) ( $config['source_label'] ?? '' );
 		$source_token = (string) ( $config['source_token'] ?? '' );
 		$target_token = '' !== $city ? sanitize_title( $city ) : '';
+
+		// 3a. Inline-list neighborhood substitution. Replaces content
+		// between <!--ehbp-neighborhoods[:N]-->...<!--/ehbp-neighborhoods-->
+		// markers anywhere in the layout's text/html settings. Runs
+		// BEFORE the text rewrite so the surrounding sentence (e.g.
+		// "throughout Orlando, FL") gets localized in the same pass.
+		$inline_fields = 0;
+		if ( ! empty( $neighborhoods ) ) {
+			$inline_fields = Neighborhoods_Inline_Substituter::apply_to_layout( $layout, $neighborhoods );
+			if ( $inline_fields > 0 ) {
+				$result['neighborhoods']['attempted']     = true;
+				$result['neighborhoods']['inline_fields'] = $inline_fields;
+				$result['neighborhoods']['count']         = max(
+					(int) $result['neighborhoods']['count'],
+					count( $neighborhoods )
+				);
+				// If Neighborhoods_Applier didn't fire (no class-tagged
+				// module on the page) but inline markers did, surface
+				// that as a successful neighborhoods step in the UI.
+				if ( ! $result['neighborhoods']['ok'] ) {
+					$result['neighborhoods']['ok']      = true;
+					$result['neighborhoods']['message'] = sprintf(
+						__( 'Substituted neighborhoods inline in %d field(s).', 'earthhaul-bulk-pages' ),
+						$inline_fields
+					);
+				}
+			}
+		}
 
 		// 4. Text rewrite pipeline.
 		if ( ! empty( $pipelines['text'] ) ) {
@@ -210,8 +238,9 @@ final class Bulk_Job_Runner {
 			}
 		}
 
-		// 7. Persist layout (covers both text + image edits made above).
-		if ( ! empty( $pipelines['text'] ) || ! empty( $pipelines['images'] ) ) {
+		// 7. Persist layout (covers text + image edits AND any inline
+		// neighborhoods substitution that fired in step 3a).
+		if ( ! empty( $pipelines['text'] ) || ! empty( $pipelines['images'] ) || $inline_fields > 0 ) {
 			Layout_Mutator::persist_layout( (int) $post_id, $layout );
 		}
 

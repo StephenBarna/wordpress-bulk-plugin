@@ -32,6 +32,7 @@ namespace EarthHaul\BulkPages\Admin;
 
 use EarthHaul\BulkPages\Services\Bulk_Job_Runner;
 use EarthHaul\BulkPages\Services\CSV_Importer;
+use EarthHaul\BulkPages\Services\Job_Storage;
 use EarthHaul\BulkPages\Services\Neighborhoods_CSV_Importer;
 use EarthHaul\BulkPages\Services\Page_Cloner;
 
@@ -343,6 +344,29 @@ final class New_Job_Screen {
 
 		$source_label = self::derive_template_label( $template_id );
 
+		// Persist bulky inputs to disk. The transient-backed state below
+		// keeps only metadata + progress + results; on hosts with a 1MB
+		// object-cache value cap (Memcached/Redis defaults), stuffing
+		// the full cities + neighborhoods arrays into the transient
+		// silently fails the SET on big runs and the progress page
+		// renders with no state.
+		$cities_rows = array_values( $parsed['rows'] );
+		if ( ! Job_Storage::write_cities( $job_id, $cities_rows ) ) {
+			self::flash_errors( array(
+				__( 'Could not write cities.json to the uploads directory. Check that wp-content/uploads is writable.', 'earthhaul-bulk-pages' ),
+			) );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) );
+			exit;
+		}
+		if ( ! Job_Storage::write_neighborhoods( $job_id, $neighborhoods ) ) {
+			Job_Storage::delete( $job_id );
+			self::flash_errors( array(
+				__( 'Could not write neighborhoods.json to the uploads directory.', 'earthhaul-bulk-pages' ),
+			) );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) );
+			exit;
+		}
+
 		$state = array(
 			'job_id'        => $job_id,
 			'template_id'   => $template_id,
@@ -352,19 +376,24 @@ final class New_Job_Screen {
 			'source_token'  => self::derive_template_token( $template_id, $source_label ),
 			'pipelines'     => $pipelines,
 			'skip_existing' => $skip_exist,
-			'cities'        => array_values( $parsed['rows'] ),
-			'neighborhoods' => $neighborhoods,
 			'warnings'      => $warnings,
 			'progress'      => array(
 				'index'     => 0,
-				'total'     => count( $parsed['rows'] ),
+				'total'     => count( $cities_rows ),
 				'cancelled' => false,
 				'started'   => time(),
 			),
 			'results'       => array(),
 		);
 
-		self::save_job_state( $job_id, $state );
+		if ( ! self::save_job_state( $job_id, $state ) ) {
+			Job_Storage::delete( $job_id );
+			self::flash_errors( array(
+				__( 'Could not save job state. The transient write failed (object-cache value-size limit?). Try splitting the cities CSV into smaller batches (e.g. 50 cities each) or contact your host about Memcached/Redis value limits.', 'earthhaul-bulk-pages' ),
+			) );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) );
+			exit;
+		}
 
 		wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG . '&ehbp_job=' . rawurlencode( $job_id ) ) );
 		exit;
@@ -657,11 +686,13 @@ final class New_Job_Screen {
 			);
 		}
 		if ( ! empty( $r['neighborhoods']['attempted'] ) ) {
+			$inline = (int) ( $r['neighborhoods']['inline_fields'] ?? 0 );
 			$lines[] = sprintf(
-				'  - neighborhoods: %s (%d entries -> %d module(s))',
+				'  - neighborhoods: %s (%d entries -> %d module(s)%s)',
 				$r['neighborhoods']['ok'] ? 'applied' : 'skipped',
 				(int) $r['neighborhoods']['count'],
-				(int) $r['neighborhoods']['modules']
+				(int) $r['neighborhoods']['modules'],
+				$inline > 0 ? sprintf( ', %d inline field(s)', $inline ) : ''
 			);
 		}
 		if ( ! empty( $r['text']['attempted'] ) ) {
@@ -731,7 +762,12 @@ final class New_Job_Screen {
 				esc_html( (string) ( $r['slug'] ?? '' ) ),
 				esc_html( (string) ( $r['action'] ?? '' ) ),
 				! empty( $r['neighborhoods']['attempted'] )
-					? esc_html( sprintf( '%d/%d', (int) $r['neighborhoods']['modules'], (int) $r['neighborhoods']['count'] ) )
+					? esc_html( sprintf(
+						'%d mod / %d inline / %d',
+						(int) $r['neighborhoods']['modules'],
+						(int) ( $r['neighborhoods']['inline_fields'] ?? 0 ),
+						(int) $r['neighborhoods']['count']
+					) )
 					: '&mdash;',
 				! empty( $r['text']['attempted'] )
 					? esc_html( sprintf( '%d ok / %d skip / %d fail', (int) $r['text']['applied'], (int) $r['text']['skipped'], (int) $r['text']['failed'] ) )
@@ -829,6 +865,7 @@ final class New_Job_Screen {
 		if ( 'cancel' === $mode ) {
 			$state['progress']['cancelled'] = true;
 			self::save_job_state( $job_id, $state );
+			Job_Storage::delete( $job_id );
 			wp_send_json_success( array(
 				'cancelled' => true,
 				'message'   => 'Cancelled. The current city (if any) finishes first.',
@@ -855,10 +892,15 @@ final class New_Job_Screen {
 			) );
 		}
 
-		$row           = (array) ( $state['cities'][ $index ] ?? array() );
-		$slug          = (string) ( $row['slug'] ?? '' );
-		$neighborhoods = isset( $state['neighborhoods'][ $slug ] )
-			? (array) $state['neighborhoods'][ $slug ]
+		// Cities + neighborhoods now live on disk (see Job_Storage). Load
+		// only the row we need for this chunk; the JSON read is cheap and
+		// memoized per-request anyway.
+		$cities_rows       = Job_Storage::read_cities( $job_id );
+		$row               = (array) ( $cities_rows[ $index ] ?? array() );
+		$slug              = (string) ( $row['slug'] ?? '' );
+		$all_neighborhoods = Job_Storage::read_neighborhoods( $job_id );
+		$neighborhoods     = isset( $all_neighborhoods[ $slug ] )
+			? (array) $all_neighborhoods[ $slug ]
 			: array();
 
 		// Long-running by design: each chunk does ~30-90s of OpenAI work.
@@ -908,8 +950,16 @@ final class New_Job_Screen {
 		self::render_results_table( $state['results'] );
 		$results_html = (string) ob_get_clean();
 
+		$is_done = $state['progress']['index'] >= $total;
+		if ( $is_done ) {
+			// Job finished cleanly; the on-disk JSON files are no longer
+			// needed. Transient still holds metadata + results so the
+			// final screen still renders if the user reloads.
+			Job_Storage::delete( $job_id );
+		}
+
 		wp_send_json_success( array(
-			'done'         => $state['progress']['index'] >= $total,
+			'done'         => $is_done,
 			'next_index'   => (int) $state['progress']['index'],
 			'total'        => $total,
 			'log_html'     => self::render_log_entry( $summary ),
@@ -936,8 +986,14 @@ final class New_Job_Screen {
 		return is_array( $state ) ? $state : null;
 	}
 
-	private static function save_job_state( string $job_id, array $state ): void {
-		set_transient( self::job_state_key( $job_id ), $state, self::JOB_STATE_TTL );
+	/**
+	 * Persist the job state into a transient. Returns true on a
+	 * successful write so the form-submit handler can surface a clear
+	 * error if the object cache silently rejects an oversized SET (1 MB
+	 * Memcached default, common on managed hosts).
+	 */
+	private static function save_job_state( string $job_id, array $state ): bool {
+		return (bool) set_transient( self::job_state_key( $job_id ), $state, self::JOB_STATE_TTL );
 	}
 
 	private static function flash_errors( array $errors ): void {
