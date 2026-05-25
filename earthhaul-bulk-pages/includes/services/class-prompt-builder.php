@@ -172,9 +172,12 @@ LOCALIZATION:
   - Where the original mentions the source city, swap to the target city.
   - Where the original mentions the source state (full or abbreviation),
     swap to the target state.
-  - Match the abbreviation/full-name pattern of the original (if the
-    original says "Orlando, FL", output "Tampa, FL"; if it says
-    "Orlando, Florida", output "Tampa, Florida").
+  - ALWAYS use the two-letter U.S. state abbreviation (FL, CA, TX, NY,
+    etc.), never the full state name. If the original says "Orlando,
+    Florida", your output uses "Tampa, FL" - shorten the state. If the
+    SOURCE / TARGET label you receive spells out the state, still output
+    the abbreviation. The only exception is if the original spells out
+    the state inside a proper noun or quote that must remain literal.
 
 TONE:
   - Match the original's tone exactly. If it is friendly, stay friendly.

@@ -448,8 +448,8 @@ final class Neighborhoods_Applier {
 			return '';
 		}
 
-		if ( class_exists( '\EarthHaul\BulkPages\Admin\Rewrite_Screen' ) ) {
-			$parsed = \EarthHaul\BulkPages\Admin\Rewrite_Screen::parse_city_state_from_title( (string) $post->post_title );
+		if ( class_exists( '\EarthHaul\BulkPages\Admin\New_Job_Screen' ) ) {
+			$parsed = \EarthHaul\BulkPages\Admin\New_Job_Screen::parse_city_state_from_title( (string) $post->post_title );
 			if ( '' !== $parsed['city'] ) {
 				return sanitize_title( $parsed['city'] );
 			}

@@ -17,10 +17,8 @@ final class Admin_Menu {
 	public const SETTINGS_PAGE_SLUG = 'ehbp-settings';
 	public const NEW_JOB_PAGE_SLUG  = 'ehbp-new-job';
 	public const INSPECT_PAGE_SLUG  = 'ehbp-inspect';
-	public const REWRITE_PAGE_SLUG       = 'ehbp-rewrite';
-	public const NEIGHBORHOODS_PAGE_SLUG = 'ehbp-neighborhoods';
-	public const CAPABILITY              = 'manage_options';
-	public const RESET_ACTION            = 'ehbp_reset_drafts';
+	public const CAPABILITY         = 'manage_options';
+	public const RESET_ACTION       = 'ehbp_reset_drafts';
 
 	public static function register(): void {
 		add_action( 'admin_menu', array( self::class, 'add_menu' ) );
@@ -67,24 +65,6 @@ final class Admin_Menu {
 
 		add_submenu_page(
 			self::MENU_SLUG,
-			__( 'Rewrite Page', 'earthhaul-bulk-pages' ),
-			__( 'Rewrite Page', 'earthhaul-bulk-pages' ),
-			self::CAPABILITY,
-			self::REWRITE_PAGE_SLUG,
-			array( Rewrite_Screen::class, 'render' )
-		);
-
-		add_submenu_page(
-			self::MENU_SLUG,
-			__( 'Neighborhoods', 'earthhaul-bulk-pages' ),
-			__( 'Neighborhoods', 'earthhaul-bulk-pages' ),
-			self::CAPABILITY,
-			self::NEIGHBORHOODS_PAGE_SLUG,
-			array( Neighborhoods_Screen::class, 'render' )
-		);
-
-		add_submenu_page(
-			self::MENU_SLUG,
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			self::CAPABILITY,
@@ -127,22 +107,22 @@ final class Admin_Menu {
 					<?php echo defined( 'WPSEO_VERSION' ) ? '<span style="color:#2e7d32;">' . esc_html__( 'detected', 'earthhaul-bulk-pages' ) . '</span>' : '<span style="color:#999;">' . esc_html__( 'not detected (optional, for meta descriptions)', 'earthhaul-bulk-pages' ) . '</span>'; ?>
 				</li>
 				<li>
-					<strong><?php esc_html_e( 'Cloned drafts:', 'earthhaul-bulk-pages' ); ?></strong>
+					<strong><?php esc_html_e( 'Cloned pages:', 'earthhaul-bulk-pages' ); ?></strong>
 					<?php echo (int) $cloned_count; ?>
 				</li>
 			</ul>
 
 			<hr>
 			<h2><?php esc_html_e( 'Reset', 'earthhaul-bulk-pages' ); ?></h2>
-			<p><?php esc_html_e( 'Force-deletes every page this plugin has cloned (anything tagged with _ehbp_source_post_id). The original Orlando template page and any non-plugin pages are NOT touched. Useful when you want to wipe and start over with a clean slate.', 'earthhaul-bulk-pages' ); ?></p>
-			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('Permanently delete <?php echo (int) $cloned_count; ?> cloned drafts? This cannot be undone.');">
+			<p><?php esc_html_e( 'Force-deletes every page this plugin has cloned (anything tagged with _ehbp_source_post_id), whether it is still a draft or has been published. Sideloaded image copies are removed with their parent page. The original Orlando template page and any non-plugin pages are NOT touched. Useful when you want to wipe and start over with a clean slate.', 'earthhaul-bulk-pages' ); ?></p>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('Permanently delete <?php echo (int) $cloned_count; ?> cloned pages (draft or published)? This cannot be undone.');">
 				<input type="hidden" name="action" value="<?php echo esc_attr( self::RESET_ACTION ); ?>">
 				<?php wp_nonce_field( self::RESET_ACTION ); ?>
 				<button type="submit" class="button button-secondary" <?php disabled( $cloned_count === 0 ); ?> style="color:#b71c1c;border-color:#b71c1c;">
 					<?php
 					printf(
 						/* translators: %d: count */
-						esc_html__( 'Delete all %d cloned drafts', 'earthhaul-bulk-pages' ),
+						esc_html__( 'Delete all %d cloned pages', 'earthhaul-bulk-pages' ),
 						(int) $cloned_count
 					);
 					?>
@@ -194,7 +174,7 @@ final class Admin_Menu {
 			'ehbp_reset_done',
 			sprintf(
 				/* translators: 1: deleted count, 2: failed count */
-				__( 'Reset complete. Deleted %1$d cloned drafts. %2$d failed.', 'earthhaul-bulk-pages' ),
+				__( 'Reset complete. Deleted %1$d cloned pages. %2$d failed.', 'earthhaul-bulk-pages' ),
 				$deleted,
 				$failed
 			),

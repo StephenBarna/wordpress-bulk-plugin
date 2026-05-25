@@ -47,9 +47,16 @@ final class Rewrite_Engine {
 	 *
 	 * @param array  $walker_output Output of Layout_Walker::inspect().
 	 * @param string $source_label  e.g. "Orlando, FL".
+	 * @param string $target_label  e.g. "Davenport, FL". When provided,
+	 *                              fields that already mention the target
+	 *                              city (and don't mention the source) are
+	 *                              skipped as "already localized" - this
+	 *                              avoids burning tokens / risking drift on
+	 *                              re-runs of pages that have already been
+	 *                              processed.
 	 * @return array<int, array<string, mixed>>
 	 */
-	public static function collect_candidates( array $walker_output, string $source_label ): array {
+	public static function collect_candidates( array $walker_output, string $source_label, string $target_label = '' ): array {
 		$out = array();
 		foreach ( $walker_output['nodes'] ?? array() as $node ) {
 			if ( ! empty( $node['is_global'] ) ) {
@@ -73,7 +80,7 @@ final class Rewrite_Engine {
 				}
 
 				$role          = Prompt_Builder::derive_role( (string) $node['module_slug'], (string) $field['path'], $kind );
-				$skip_reason   = self::should_skip( $value, $source_label );
+				$skip_reason   = self::should_skip( $value, $source_label, $target_label );
 
 				$out[] = array(
 					'node_id'     => (string) $node['node_id'],
@@ -93,9 +100,18 @@ final class Rewrite_Engine {
 
 	/**
 	 * Determine whether we can confidently skip the API call for this
-	 * field. Conservative: only skip if the field is clearly static.
+	 * field. Two skip categories:
+	 *
+	 *   - 'short_no_locale': short template UI like "Get a quote", which
+	 *     never benefits from rewriting.
+	 *
+	 *   - 'already_localized': field mentions the target city and does
+	 *     NOT mention the source city. Either the page was processed
+	 *     previously and we'd just spin tokens to confirm "yep, still
+	 *     Davenport", or the field happened to start out target-specific.
+	 *     Either way: no API call needed.
 	 */
-	private static function should_skip( string $original, string $source_label ): string {
+	private static function should_skip( string $original, string $source_label, string $target_label = '' ): string {
 		$plain = trim( wp_strip_all_tags( $original ) );
 		if ( '' === $plain ) {
 			return 'empty';
@@ -104,15 +120,32 @@ final class Rewrite_Engine {
 		$word_count = str_word_count( $plain );
 
 		$source_city = self::extract_city( $source_label );
-		$has_city    = '' !== $source_city && stripos( $plain, $source_city ) !== false;
+		$target_city = self::extract_city( $target_label );
+		$has_source  = '' !== $source_city && self::contains_word( $plain, $source_city );
+		$has_target  = '' !== $target_city && self::contains_word( $plain, $target_city );
 		$has_state   = self::contains_state_token( $plain, $source_label );
 
+		if ( $has_target && ! $has_source ) {
+			return 'already_localized';
+		}
+
 		// Short strings without any city/state token are template UI like "Get a quote".
-		if ( $word_count <= 4 && ! $has_city && ! $has_state ) {
+		if ( $word_count <= 4 && ! $has_source && ! $has_state ) {
 			return 'short_no_locale';
 		}
 
 		return '';
+	}
+
+	/**
+	 * Whole-word case-insensitive containment test. Avoids false positives
+	 * like "Davenport" matching inside "Davenports" or partial matches.
+	 */
+	private static function contains_word( string $haystack, string $needle ): bool {
+		if ( '' === $needle ) {
+			return false;
+		}
+		return (bool) preg_match( '/\b' . preg_quote( $needle, '/' ) . '\b/i', $haystack );
 	}
 
 	/**
