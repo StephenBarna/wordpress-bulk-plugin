@@ -19,10 +19,12 @@ final class Admin_Menu {
 	public const INSPECT_PAGE_SLUG  = 'ehbp-inspect';
 	public const CAPABILITY         = 'manage_options';
 	public const RESET_ACTION       = 'ehbp_reset_drafts';
+	public const PUBLISH_ACTION     = 'ehbp_publish_drafts';
 
 	public static function register(): void {
 		add_action( 'admin_menu', array( self::class, 'add_menu' ) );
 		add_action( 'admin_post_' . self::RESET_ACTION, array( self::class, 'handle_reset' ) );
+		add_action( 'admin_post_' . self::PUBLISH_ACTION, array( self::class, 'handle_publish_drafts' ) );
 	}
 
 	public static function add_menu(): void {
@@ -77,7 +79,9 @@ final class Admin_Menu {
 		$settings_url = admin_url( 'admin.php?page=' . self::SETTINGS_PAGE_SLUG );
 		$new_job_url  = admin_url( 'admin.php?page=' . self::NEW_JOB_PAGE_SLUG );
 
-		$cloned_count = self::count_cloned_drafts();
+		$cloned_count        = self::count_cloned_drafts();
+		$draft_count         = self::count_cloned_by_status( 'draft' );
+		$published_count     = self::count_cloned_by_status( 'publish' );
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Bulk Pages', 'earthhaul-bulk-pages' ); ?></h1>
@@ -108,9 +112,34 @@ final class Admin_Menu {
 				</li>
 				<li>
 					<strong><?php esc_html_e( 'Cloned pages:', 'earthhaul-bulk-pages' ); ?></strong>
-					<?php echo (int) $cloned_count; ?>
+					<?php
+					printf(
+						/* translators: 1: total cloned, 2: drafts, 3: published */
+						esc_html__( '%1$d total (%2$d draft, %3$d published)', 'earthhaul-bulk-pages' ),
+						(int) $cloned_count,
+						(int) $draft_count,
+						(int) $published_count
+					);
+					?>
 				</li>
 			</ul>
+
+			<hr>
+			<h2><?php esc_html_e( 'Publish drafts', 'earthhaul-bulk-pages' ); ?></h2>
+			<p><?php esc_html_e( 'Flips every cloned draft to published in one click. Drafts are invisible to Google - only published pages get crawled and indexed. Run this once you have spot-checked the AI output and you are ready for the new pages to go live.', 'earthhaul-bulk-pages' ); ?></p>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('Publish <?php echo (int) $draft_count; ?> cloned drafts? They will go live immediately.');">
+				<input type="hidden" name="action" value="<?php echo esc_attr( self::PUBLISH_ACTION ); ?>">
+				<?php wp_nonce_field( self::PUBLISH_ACTION ); ?>
+				<button type="submit" class="button button-primary" <?php disabled( $draft_count === 0 ); ?>>
+					<?php
+					printf(
+						/* translators: %d: count */
+						esc_html__( 'Publish all %d cloned drafts', 'earthhaul-bulk-pages' ),
+						(int) $draft_count
+					);
+					?>
+				</button>
+			</form>
 
 			<hr>
 			<h2><?php esc_html_e( 'Reset', 'earthhaul-bulk-pages' ); ?></h2>
@@ -141,6 +170,88 @@ final class Admin_Menu {
 			WHERE meta_key = '_ehbp_source_post_id'
 			"
 		);
+	}
+
+	/**
+	 * Count cloned posts in a given post_status. Used for the dashboard
+	 * to show draft vs published splits, and to gate the Publish button.
+	 */
+	private static function count_cloned_by_status( string $status ): int {
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"
+				SELECT COUNT(DISTINCT pm.post_id)
+				FROM {$wpdb->postmeta} pm
+				INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+				WHERE pm.meta_key = '_ehbp_source_post_id'
+				  AND p.post_status = %s
+				",
+				$status
+			)
+		);
+	}
+
+	/**
+	 * Bulk-publish every cloned draft. Drafts only - already-published
+	 * pages stay published. Uses wp_update_post so post_modified updates
+	 * and Yoast / sitemap pickups happen normally.
+	 */
+	public static function handle_publish_drafts(): void {
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_die( esc_html__( 'You do not have permission to do that.', 'earthhaul-bulk-pages' ) );
+		}
+		check_admin_referer( self::PUBLISH_ACTION );
+
+		global $wpdb;
+		$ids = $wpdb->get_col(
+			"
+			SELECT DISTINCT pm.post_id
+			FROM {$wpdb->postmeta} pm
+			INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+			WHERE pm.meta_key = '_ehbp_source_post_id'
+			  AND p.post_status = 'draft'
+			"
+		);
+
+		// Long batches are possible (~hundreds of posts). Drop the time
+		// limit so wp_update_post + Yoast post-save hooks have room.
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+
+		$published = 0;
+		$failed    = 0;
+		foreach ( $ids as $id ) {
+			$result = wp_update_post(
+				array(
+					'ID'          => (int) $id,
+					'post_status' => 'publish',
+				),
+				true
+			);
+			if ( is_wp_error( $result ) || 0 === (int) $result ) {
+				$failed++;
+				continue;
+			}
+			$published++;
+		}
+
+		add_settings_error(
+			'ehbp_dashboard',
+			'ehbp_publish_done',
+			sprintf(
+				/* translators: 1: published count, 2: failed count */
+				__( 'Publish complete. Published %1$d cloned drafts. %2$d failed.', 'earthhaul-bulk-pages' ),
+				$published,
+				$failed
+			),
+			'success'
+		);
+		set_transient( 'settings_errors', get_settings_errors(), 30 );
+
+		wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+		exit;
 	}
 
 	public static function handle_reset(): void {
