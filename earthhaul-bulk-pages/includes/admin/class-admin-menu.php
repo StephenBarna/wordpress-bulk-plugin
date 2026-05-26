@@ -69,6 +69,15 @@ final class Admin_Menu {
 
 		add_submenu_page(
 			self::MENU_SLUG,
+			__( 'Patch Pages', 'earthhaul-bulk-pages' ),
+			__( 'Patch Pages', 'earthhaul-bulk-pages' ),
+			self::CAPABILITY,
+			Patch_Screen::PAGE_SLUG,
+			array( Patch_Screen::class, 'render' )
+		);
+
+		add_submenu_page(
+			self::MENU_SLUG,
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			self::CAPABILITY,

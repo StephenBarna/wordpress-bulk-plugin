@@ -47,6 +47,7 @@ final class New_Job_Screen {
 	public const RUN_NONCE            = 'ehbp_run_clone_job';
 	public const STEP_AJAX_ACTION     = 'ehbp_bulk_job_step';
 	public const TEMPLATE_DL_ACTION   = 'ehbp_download_csv_template';
+	public const DETECT_AJAX_ACTION   = 'ehbp_detect_template_mode';
 	public const RESULT_KEY           = 'ehbp_last_job_result';
 	public const JOB_STATE_TTL        = HOUR_IN_SECONDS;
 
@@ -56,6 +57,31 @@ final class New_Job_Screen {
 		add_action( 'admin_post_' . self::RUN_ACTION, array( self::class, 'handle_submit' ) );
 		add_action( 'admin_post_' . self::TEMPLATE_DL_ACTION, array( self::class, 'handle_template_download' ) );
 		add_action( 'wp_ajax_' . self::STEP_AJAX_ACTION, array( self::class, 'handle_ajax_step' ) );
+		add_action( 'wp_ajax_' . self::DETECT_AJAX_ACTION, array( self::class, 'handle_ajax_detect_mode' ) );
+	}
+
+	/**
+	 * AJAX endpoint backing the form's live "auto-detected mode" banner.
+	 *
+	 * Given a template post ID, returns whether the runner will treat
+	 * this as a service sub-page job (and which location template +
+	 * slug it'll use) so the user can confirm the right thing will
+	 * happen BEFORE submitting. Same detection rule as the runner —
+	 * see {@see Bulk_Job_Runner::auto_detect_service_mode()}.
+	 */
+	public static function handle_ajax_detect_mode(): void {
+		if ( ! current_user_can( Admin_Menu::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => 'forbidden' ), 403 );
+		}
+		check_ajax_referer( self::DETECT_AJAX_ACTION, 'nonce' );
+
+		$template_id = isset( $_POST['template_id'] ) ? (int) $_POST['template_id'] : 0;
+		if ( $template_id <= 0 ) {
+			wp_send_json_success( array( 'service_mode' => false ) );
+		}
+
+		$detected = \EarthHaul\BulkPages\Services\Bulk_Job_Runner::auto_detect_service_mode( $template_id );
+		wp_send_json_success( $detected );
 	}
 
 	public static function render(): void {
@@ -70,7 +96,14 @@ final class New_Job_Screen {
 		}
 		?>
 		<div class="wrap">
-			<h1><?php esc_html_e( 'Bulk Pages - New Job', 'earthhaul-bulk-pages' ); ?></h1>
+			<h1>
+				<?php esc_html_e( 'Bulk Pages - New Job', 'earthhaul-bulk-pages' ); ?>
+				<?php if ( defined( 'EHBP_VERSION' ) ) : ?>
+					<span style="font-size:13px;font-weight:normal;color:#646970;margin-left:8px;">
+						<?php echo esc_html( sprintf( __( 'plugin v%s', 'earthhaul-bulk-pages' ), EHBP_VERSION ) ); ?>
+					</span>
+				<?php endif; ?>
+			</h1>
 
 			<?php if ( ! $bb_active ) : ?>
 				<div class="notice notice-error"><p><?php esc_html_e( 'Beaver Builder is not active. Activate it before running a job.', 'earthhaul-bulk-pages' ); ?></p></div>
@@ -102,6 +135,7 @@ final class New_Job_Screen {
 						<td>
 							<?php self::render_template_dropdown(); ?>
 							<p class="description"><?php esc_html_e( 'Only pages with Beaver Builder enabled are listed. Default suggestion is the Orlando location page if it exists. The "City, State" pair is parsed from this page\'s title and used as the source label for the AI pipelines.', 'earthhaul-bulk-pages' ); ?></p>
+							<div id="ehbp-mode-banner" style="display:none;margin-top:10px;padding:10px 12px;border-left:4px solid #2271b1;background:#f0f6fc;"></div>
 						</td>
 					</tr>
 					<tr>
@@ -179,11 +213,106 @@ final class New_Job_Screen {
 							</label>
 						</td>
 					</tr>
+					<tr>
+						<th scope="row"><?php esc_html_e( 'Service / sub-page mode', 'earthhaul-bulk-pages' ); ?></th>
+						<td>
+							<p class="description" style="margin-top:0;">
+								<?php esc_html_e( 'Auto-detected from the Template page. If the template lives under a city you\'ve already cloned out (e.g. /locations/orlando-fl/concrete-disposal-dumpster-rentals/), the runner clones it once per city, parents each clone under that city\'s existing location page, and reuses the template\'s slug for every clone. The blue banner above the form confirms exactly what will happen.', 'earthhaul-bulk-pages' ); ?>
+							</p>
+							<details style="margin-top:10px;">
+								<summary style="cursor:pointer;color:#2271b1;"><?php esc_html_e( 'Manual override (only needed if auto-detect is wrong)', 'earthhaul-bulk-pages' ); ?></summary>
+								<p style="margin-top:12px;">
+									<label for="ehbp_page_slug_override" style="display:inline-block;width:200px;"><?php esc_html_e( 'Page slug override:', 'earthhaul-bulk-pages' ); ?></label>
+									<input type="text" name="ehbp_page_slug_override" id="ehbp_page_slug_override" class="regular-text" placeholder="<?php esc_attr_e( '(auto)', 'earthhaul-bulk-pages' ); ?>" value="">
+								</p>
+								<p class="description" style="margin-left:200px;margin-top:0;">
+									<?php esc_html_e( 'Leave blank to use the template\'s own slug. Set only to force a different slug for every clone.', 'earthhaul-bulk-pages' ); ?>
+								</p>
+								<p style="margin-top:12px;">
+									<label>
+										<input type="checkbox" name="ehbp_parent_lookup_by_city" value="1">
+										<?php esc_html_e( "Force dynamic parent lookup (auto-on when service template is detected)", 'earthhaul-bulk-pages' ); ?>
+									</label>
+								</p>
+								<p style="margin-top:8px;">
+									<label for="ehbp_location_template_id" style="display:inline-block;width:200px;"><?php esc_html_e( 'Location template:', 'earthhaul-bulk-pages' ); ?></label>
+									<?php self::render_location_template_dropdown(); ?>
+								</p>
+								<p class="description" style="margin-left:200px;margin-top:0;">
+									<?php esc_html_e( 'Leave at "(not used unless dynamic parent is checked)" for auto-detect. Override only if the source template\'s parent is not the right location template.', 'earthhaul-bulk-pages' ); ?>
+								</p>
+							</details>
+						</td>
+					</tr>
 				</table>
 
 				<?php submit_button( __( 'Run', 'earthhaul-bulk-pages' ) ); ?>
 			</form>
+			<?php self::render_mode_detector_js(); ?>
 		</div>
+		<?php
+	}
+
+	/**
+	 * Hidden helper that wires up the live "auto-detected mode" banner.
+	 * On page load and on every change to the Template dropdown, fires a
+	 * lightweight AJAX call that runs Bulk_Job_Runner::auto_detect_service_mode
+	 * and renders a plain-English summary so the user can confirm what
+	 * the run will do without reading the docblock.
+	 */
+	private static function render_mode_detector_js(): void {
+		$nonce    = wp_create_nonce( self::DETECT_AJAX_ACTION );
+		$ajax_url = admin_url( 'admin-ajax.php' );
+		?>
+		<script>
+		(function () {
+			var ajaxUrl = <?php echo wp_json_encode( $ajax_url ); ?>;
+			var nonce   = <?php echo wp_json_encode( $nonce ); ?>;
+			var dd      = document.getElementById('ehbp_template');
+			var banner  = document.getElementById('ehbp-mode-banner');
+			if (!dd || !banner) { return; }
+
+			function detect() {
+				var id = parseInt(dd.value || '0', 10);
+				if (!id) {
+					banner.style.display = 'none';
+					banner.innerHTML = '';
+					return;
+				}
+				var fd = new FormData();
+				fd.append('action', <?php echo wp_json_encode( self::DETECT_AJAX_ACTION ); ?>);
+				fd.append('nonce', nonce);
+				fd.append('template_id', String(id));
+				fetch(ajaxUrl, { method: 'POST', body: fd, credentials: 'same-origin' })
+					.then(function (r) { return r.json(); })
+					.then(function (json) {
+						if (!json || !json.success) { return; }
+						var d = json.data || {};
+						banner.style.display = 'block';
+						if (d.service_mode) {
+							banner.innerHTML =
+								'<strong>Detected: Service sub-page mode.</strong> ' +
+								'Each cloned page will be parented under the matching city\'s existing ' +
+								'<em>' + escapeHtml(d.location_template_title || '(unknown)') + '</em>-style location page, ' +
+								'and will use the slug <code>' + escapeHtml(d.page_slug_override || '') + '</code>. ' +
+								'No further config needed below.';
+						} else {
+							banner.innerHTML =
+								'<strong>Detected: Standard location-page mode.</strong> ' +
+								'Each cloned page will use its CSV row\'s slug as the URL slug and the "Parent page" you picked above as its parent.';
+						}
+					})
+					.catch(function () { /* leave banner hidden on error */ });
+			}
+			function escapeHtml(s) {
+				return String(s).replace(/[&<>"']/g, function (c) {
+					return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+				});
+			}
+			dd.addEventListener('change', detect);
+			detect();
+		})();
+		</script>
 		<?php
 	}
 
@@ -242,6 +371,41 @@ final class New_Job_Screen {
 		echo '</select>';
 	}
 
+	/**
+	 * Manual-override-only dropdown that lists every BB-enabled page so
+	 * the user can force a different "location template" if the auto-
+	 * detect (template->post_parent) isn't right. Defaults to value 0,
+	 * meaning "leave to auto-detect"; the runner only honors the form
+	 * value if the user also checked the "Force dynamic parent lookup"
+	 * box, otherwise auto-detect wins.
+	 */
+	private static function render_location_template_dropdown(): void {
+		global $wpdb;
+
+		$results = $wpdb->get_results(
+			"
+			SELECT p.ID, p.post_title, p.post_status
+			FROM {$wpdb->posts} p
+			INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = '_fl_builder_enabled' AND pm.meta_value = '1'
+			WHERE p.post_type = 'page' AND p.post_status IN ('publish','draft','private')
+			ORDER BY p.post_title ASC
+			LIMIT 500
+			"
+		);
+
+		echo '<select name="ehbp_location_template_id" id="ehbp_location_template_id" class="regular-text" style="max-width: 520px;">';
+		echo '<option value="0" selected>' . esc_html__( '-- (auto-detect from template parent) --', 'earthhaul-bulk-pages' ) . '</option>';
+		foreach ( $results as $row ) {
+			printf(
+				'<option value="%1$d">%2$s (#%1$d, %3$s)</option>',
+				(int) $row->ID,
+				esc_html( $row->post_title ),
+				esc_html( $row->post_status )
+			);
+		}
+		echo '</select>';
+	}
+
 	/* -------------------------------------------------------------------- */
 	/* Submit                                                                */
 	/* -------------------------------------------------------------------- */
@@ -260,6 +424,15 @@ final class New_Job_Screen {
 			? sanitize_text_field( wp_unslash( (string) $_POST['ehbp_title_format'] ) )
 			: self::DEFAULT_TITLE_FORMAT;
 
+		// Service / sub-page mode flags.
+		$page_slug_override    = isset( $_POST['ehbp_page_slug_override'] )
+			? sanitize_title( wp_unslash( (string) $_POST['ehbp_page_slug_override'] ) )
+			: '';
+		$parent_lookup_by_city = ! empty( $_POST['ehbp_parent_lookup_by_city'] );
+		$location_template_id  = isset( $_POST['ehbp_location_template_id'] )
+			? (int) $_POST['ehbp_location_template_id']
+			: 0;
+
 		$pipelines_in = isset( $_POST['ehbp_pipelines'] ) && is_array( $_POST['ehbp_pipelines'] )
 			? wp_unslash( (array) $_POST['ehbp_pipelines'] )
 			: array();
@@ -277,6 +450,13 @@ final class New_Job_Screen {
 		if ( ! isset( $_FILES['ehbp_csv'] ) || empty( $_FILES['ehbp_csv']['tmp_name'] ) ) {
 			$errors[] = __( 'Upload a Cities CSV file.', 'earthhaul-bulk-pages' );
 		}
+		// Manual dynamic-parent override without a manual Location
+		// template is fine now: Bulk_Job_Runner::auto_detect_service_mode
+		// fills it in from the source template's post_parent. We only
+		// flag the case where neither auto-detect nor the user supplied
+		// a usable parent template, which surfaces at runtime as a
+		// clear per-row "could not find an existing location page"
+		// error rather than a silent misroute.
 
 		if ( ! empty( $errors ) ) {
 			self::flash_errors( $errors );
@@ -368,15 +548,18 @@ final class New_Job_Screen {
 		}
 
 		$state = array(
-			'job_id'        => $job_id,
-			'template_id'   => $template_id,
-			'parent_id'     => $parent_id,
-			'title_fmt'     => $title_fmt,
-			'source_label'  => $source_label,
-			'source_token'  => self::derive_template_token( $template_id, $source_label ),
-			'pipelines'     => $pipelines,
-			'skip_existing' => $skip_exist,
-			'warnings'      => $warnings,
+			'job_id'                => $job_id,
+			'template_id'           => $template_id,
+			'parent_id'             => $parent_id,
+			'title_fmt'             => $title_fmt,
+			'source_label'          => $source_label,
+			'source_token'          => self::derive_template_token( $template_id, $source_label ),
+			'pipelines'             => $pipelines,
+			'skip_existing'         => $skip_exist,
+			'page_slug_override'    => $page_slug_override,
+			'parent_lookup_by_city' => $parent_lookup_by_city,
+			'location_template_id'  => $location_template_id,
+			'warnings'              => $warnings,
 			'progress'      => array(
 				'index'     => 0,
 				'total'     => count( $cities_rows ),
@@ -410,22 +593,149 @@ final class New_Job_Screen {
 	 * to and including the preposition.
 	 */
 	private static function derive_template_label( int $template_id ): string {
-		$title = (string) get_the_title( $template_id );
-		$pair  = self::parse_city_state_from_title( $title );
-		if ( '' !== $pair['city'] && '' !== $pair['state'] ) {
-			return $pair['city'] . ', ' . $pair['state'];
+		// Strategy: try every signal in order until one gives us a clean
+		// "City, State" pair. The page title is the most-readable signal
+		// but also the most user-mutable, so we layer fallbacks that go
+		// (a) the parent's title (for service sub-pages), (b) the parent's
+		// SLUG (most reliable — slugs follow the city-state-abbrev
+		// convention almost universally), and finally (c) the template's
+		// own slug.
+		$direct = self::label_from_title( (string) get_the_title( $template_id ) );
+		if ( '' !== $direct ) {
+			return $direct;
 		}
-		return $title;
+
+		$auto = \EarthHaul\BulkPages\Services\Bulk_Job_Runner::auto_detect_service_mode( $template_id );
+		if ( ! empty( $auto['service_mode'] ) ) {
+			$parent_id = (int) $auto['location_template_id'];
+
+			$from_parent_title = self::label_from_title( (string) get_the_title( $parent_id ) );
+			if ( '' !== $from_parent_title ) {
+				return $from_parent_title;
+			}
+
+			$from_parent_slug = self::label_from_slug( $parent_id );
+			if ( '' !== $from_parent_slug ) {
+				return $from_parent_slug;
+			}
+		}
+
+		$from_own_slug = self::label_from_slug( $template_id );
+		if ( '' !== $from_own_slug ) {
+			return $from_own_slug;
+		}
+
+		return (string) get_the_title( $template_id );
 	}
 
 	private static function derive_template_token( int $template_id, string $source_label ): string {
+		// First preference: explicit per-page meta stamped by the plugin
+		// when it cloned the page itself.
 		$meta = (string) get_post_meta( $template_id, Page_Cloner::META_CITY_NAME, true );
 		if ( '' !== $meta ) {
 			return sanitize_title( $meta );
 		}
+
+		$auto = \EarthHaul\BulkPages\Services\Bulk_Job_Runner::auto_detect_service_mode( $template_id );
+		if ( ! empty( $auto['service_mode'] ) ) {
+			$parent_id   = (int) $auto['location_template_id'];
+
+			$parent_meta = (string) get_post_meta( $parent_id, Page_Cloner::META_CITY_NAME, true );
+			if ( '' !== $parent_meta ) {
+				return sanitize_title( $parent_meta );
+			}
+
+			$parent_pair = self::parse_city_state_from_title( (string) get_the_title( $parent_id ) );
+			if ( '' !== $parent_pair['city'] ) {
+				return sanitize_title( $parent_pair['city'] );
+			}
+
+			// Slug fallback. The "Orlando, FL" page may literally be
+			// titled "Orlando" with no comma, but its slug is reliably
+			// "orlando-fl". Strip the trailing 2-letter state code and
+			// the rest is the city token we want.
+			$parent_post = get_post( $parent_id );
+			if ( $parent_post ) {
+				$city_slug = self::city_slug_from_post_slug( (string) $parent_post->post_name );
+				if ( '' !== $city_slug ) {
+					return $city_slug;
+				}
+			}
+		}
+
+		// Final fallback: parse the source_label string we were given.
 		$parts = explode( ',', $source_label );
 		$city  = trim( $parts[0] ?? '' );
 		return '' !== $city ? sanitize_title( $city ) : '';
+	}
+
+	/**
+	 * Try to derive a "City, State" label string from a post title, which
+	 * may be in any of these shapes:
+	 *   "Orlando, FL"                            -> "Orlando, FL"
+	 *   "Orlando, Florida"                       -> "Orlando, Florida"
+	 *   "Roll-Off Dumpster Rentals in Orlando, FL" -> "Orlando, FL"
+	 * Returns '' when none of those parse.
+	 */
+	private static function label_from_title( string $title ): string {
+		$pair = self::parse_city_state_from_title( $title );
+		if ( '' !== $pair['city'] && '' !== $pair['state'] ) {
+			return $pair['city'] . ', ' . $pair['state'];
+		}
+		return '';
+	}
+
+	/**
+	 * Derive a "City, ST" label from a post slug like "orlando-fl" or
+	 * "winter-haven-fl". The trailing two-letter state code is the
+	 * convention every city slug on EarthHaul follows; everything before
+	 * it is the city, with hyphens turned back into spaces.
+	 */
+	private static function label_from_slug( int $post_id ): string {
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return '';
+		}
+		$city_slug = self::city_slug_from_post_slug( (string) $post->post_name );
+		$state     = self::state_from_post_slug( (string) $post->post_name );
+		if ( '' === $city_slug || '' === $state ) {
+			return '';
+		}
+		// "winter-haven" -> "Winter Haven".
+		$city = ucwords( str_replace( '-', ' ', $city_slug ) );
+		return $city . ', ' . strtoupper( $state );
+	}
+
+	private static function city_slug_from_post_slug( string $post_slug ): string {
+		$post_slug = sanitize_title( $post_slug );
+		if ( '' === $post_slug ) {
+			return '';
+		}
+		$parts = explode( '-', $post_slug );
+		if ( count( $parts ) < 2 ) {
+			return '';
+		}
+		$tail = (string) end( $parts );
+		// State code must be exactly 2 alpha chars, and there must be
+		// at least one slug segment before it for the city.
+		if ( 2 === strlen( $tail ) && preg_match( '/^[a-z]{2}$/i', $tail ) && count( $parts ) > 1 ) {
+			array_pop( $parts );
+			return implode( '-', $parts );
+		}
+		return '';
+	}
+
+	private static function state_from_post_slug( string $post_slug ): string {
+		$post_slug = sanitize_title( $post_slug );
+		if ( '' === $post_slug ) {
+			return '';
+		}
+		$parts = explode( '-', $post_slug );
+		$tail  = (string) end( $parts );
+		if ( 2 === strlen( $tail ) && preg_match( '/^[a-z]{2}$/i', $tail ) ) {
+			return strtolower( $tail );
+		}
+		return '';
 	}
 
 	/**
@@ -685,6 +995,22 @@ final class New_Job_Screen {
 				(int) $r['post_id']
 			);
 		}
+		// Surface the resolved source/target identity so it's obvious from
+		// the live log whether image renaming + AI rewrites have the
+		// right city signals to work with.
+		if ( ! empty( $r['debug'] ) && is_array( $r['debug'] ) ) {
+			$src_label  = (string) ( $r['debug']['source_label'] ?? '' );
+			$src_token  = (string) ( $r['debug']['source_token'] ?? '' );
+			$tgt_token  = (string) ( $r['debug']['target_token'] ?? '' );
+			if ( '' !== $src_label || '' !== $src_token || '' !== $tgt_token ) {
+				$lines[] = sprintf(
+					'  - <span style="color:#646970;">source: <code>%s</code> (token <code>%s</code>) &rarr; target token <code>%s</code></span>',
+					esc_html( $src_label ),
+					esc_html( $src_token ),
+					esc_html( $tgt_token )
+				);
+			}
+		}
 		if ( ! empty( $r['neighborhoods']['attempted'] ) ) {
 			$inline = (int) ( $r['neighborhoods']['inline_fields'] ?? 0 );
 			$lines[] = sprintf(
@@ -704,11 +1030,17 @@ final class New_Job_Screen {
 			);
 		}
 		if ( ! empty( $r['images']['attempted'] ) ) {
+			$candidates = (int) ( $r['images']['candidates'] ?? 0 );
 			$lines[] = sprintf(
-				'  - images: %d applied, %d failed',
+				'  - images: %d applied, %d failed (%d candidate%s found)',
 				(int) $r['images']['applied'],
-				(int) $r['images']['failed']
+				(int) $r['images']['failed'],
+				$candidates,
+				1 === $candidates ? '' : 's'
 			);
+			if ( 0 === $candidates ) {
+				$lines[] = '  - <span style="color:#b06000;">no image candidates detected. Check that the source token above matches your filename pattern (e.g. token <code>orlando</code> for files named <code>...-orlando-fl.jpg</code>).</span>';
+			}
 		}
 		if ( ! empty( $r['meta']['attempted'] ) ) {
 			$lines[] = sprintf(
@@ -918,13 +1250,16 @@ final class New_Job_Screen {
 			(int) $state['template_id'],
 			$row,
 			array(
-				'parent_id'     => (int) $state['parent_id'],
-				'title_fmt'     => (string) $state['title_fmt'],
-				'job_id'        => (string) $state['job_id'],
-				'source_label'  => (string) $state['source_label'],
-				'source_token'  => (string) $state['source_token'],
-				'skip_existing' => ! empty( $state['skip_existing'] ),
-				'pipelines'     => (array) $state['pipelines'],
+				'parent_id'             => (int) $state['parent_id'],
+				'title_fmt'             => (string) $state['title_fmt'],
+				'job_id'                => (string) $state['job_id'],
+				'source_label'          => (string) $state['source_label'],
+				'source_token'          => (string) $state['source_token'],
+				'skip_existing'         => ! empty( $state['skip_existing'] ),
+				'pipelines'             => (array) $state['pipelines'],
+				'page_slug_override'    => (string) ( $state['page_slug_override'] ?? '' ),
+				'parent_lookup_by_city' => ! empty( $state['parent_lookup_by_city'] ),
+				'location_template_id'  => (int) ( $state['location_template_id'] ?? 0 ),
 			),
 			$neighborhoods
 		);

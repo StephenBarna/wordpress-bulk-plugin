@@ -40,8 +40,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Image_Pipeline {
 
-	private const MANAGED_CLASSES = array( 'ehbp-neighborhoods' );
-	private const ALT_MAX_CHARS   = 125;
+	private const MANAGED_CLASSES   = array( 'ehbp-neighborhoods' );
+	private const NO_REWRITE_CLASS  = 'ehbp-no-rewrite';
+	private const ALT_MAX_CHARS     = 125;
 
 	/**
 	 * Collect a deduped list of image candidates that need per-city copies.
@@ -89,6 +90,9 @@ final class Image_Pipeline {
 				continue;
 			}
 			if ( self::has_managed_class( (string) ( $node['class'] ?? '' ) ) ) {
+				continue;
+			}
+			if ( self::has_no_rewrite_class( (string) ( $node['ancestor_classes'] ?? $node['class'] ?? '' ) ) ) {
 				continue;
 			}
 
@@ -151,6 +155,9 @@ final class Image_Pipeline {
 					}
 					$class = isset( $node->settings->class ) ? (string) $node->settings->class : '';
 					if ( self::has_managed_class( $class ) ) {
+						continue;
+					}
+					if ( self::has_no_rewrite_class( $class ) ) {
 						continue;
 					}
 
@@ -800,6 +807,14 @@ final class Image_Pipeline {
 			}
 		}
 		return false;
+	}
+
+	private static function has_no_rewrite_class( string $class_attr ): bool {
+		if ( '' === $class_attr ) {
+			return false;
+		}
+		$tokens = preg_split( '/\s+/', trim( $class_attr ) ) ?: array();
+		return in_array( self::NO_REWRITE_CLASS, $tokens, true );
 	}
 
 	/**

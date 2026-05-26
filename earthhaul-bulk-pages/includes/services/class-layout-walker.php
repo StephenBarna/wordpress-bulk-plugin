@@ -195,16 +195,24 @@ final class Layout_Walker {
 				$inventory['summary']['globals']++;
 			}
 
+			$own_class = isset( $node->settings->class ) ? (string) $node->settings->class : '';
+
 			$entry = array(
-				'node_id'     => (string) $node_id,
-				'type'        => $type,
-				'row_id'      => $row_node_id,
-				'is_global'   => $is_global,
-				'module_slug' => $module_slug,
-				'fields'      => array(),
-				'label'       => self::derive_node_label( $node ),
-				'schema'      => 'n/a',
-				'class'       => isset( $node->settings->class ) ? (string) $node->settings->class : '',
+				'node_id'           => (string) $node_id,
+				'type'              => $type,
+				'row_id'            => $row_node_id,
+				'is_global'         => $is_global,
+				'module_slug'       => $module_slug,
+				'fields'            => array(),
+				'label'             => self::derive_node_label( $node ),
+				'schema'            => 'n/a',
+				'class'             => $own_class,
+				// All classes from this node + every parent node up to the
+				// row level, joined with spaces. Lets downstream pipelines
+				// (rewrite engine, image pipeline) honor a class set on a
+				// containing row without having to walk the parent chain
+				// themselves.
+				'ancestor_classes'  => self::collect_ancestor_classes( (string) $node_id, $layout, $parent_lookup, $own_class ),
 			);
 
 			if ( $is_global ) {
@@ -426,6 +434,38 @@ final class Layout_Walker {
 			$guard++;
 		}
 		return $current;
+	}
+
+	/**
+	 * Concatenate the CSS class strings of a node and every ancestor
+	 * (column, row) into one space-separated string. Used so
+	 * Rewrite_Engine + Image_Pipeline can honor a class like
+	 * `ehbp-no-rewrite` placed on a containing row without each pipeline
+	 * having to walk the parent chain itself.
+	 */
+	private static function collect_ancestor_classes( string $node_id, array $layout, array $parent_lookup, string $own_class ): string {
+		$classes = array();
+		if ( '' !== $own_class ) {
+			$classes[] = $own_class;
+		}
+		$current = $parent_lookup[ $node_id ] ?? '';
+		$guard   = 0;
+		while ( '' !== $current && $guard < 16 ) {
+			$node = $layout[ $current ] ?? null;
+			if ( is_object( $node ) && isset( $node->settings->class ) ) {
+				$cls = (string) $node->settings->class;
+				if ( '' !== $cls ) {
+					$classes[] = $cls;
+				}
+			}
+			$next = $parent_lookup[ $current ] ?? '';
+			if ( $next === $current || '' === $next ) {
+				break;
+			}
+			$current = $next;
+			$guard++;
+		}
+		return implode( ' ', $classes );
 	}
 
 	/**

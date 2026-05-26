@@ -28,6 +28,7 @@ final class Plugin {
 			Admin\Settings_Page::register();
 			Admin\New_Job_Screen::register();
 			Admin\Inspect_Screen::register();
+			Admin\Patch_Screen::register();
 		}
 	}
 

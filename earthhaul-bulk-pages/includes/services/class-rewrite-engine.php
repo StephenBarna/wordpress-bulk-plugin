@@ -40,6 +40,17 @@ final class Rewrite_Engine {
 	private const MANAGED_CLASSES = array( 'ehbp-neighborhoods' );
 
 	/**
+	 * User-applied opt-out class. Adding `ehbp-no-rewrite` to a module,
+	 * column, or row in Beaver Builder excludes that whole subtree from
+	 * the AI text rewrite. Use this on category labels ("Available Sizes"),
+	 * pricing tables, or anywhere the wording must stay literal.
+	 *
+	 * The class is INHERITED downward: putting it on a row also excludes
+	 * every column and module inside that row.
+	 */
+	private const NO_REWRITE_CLASS = 'ehbp-no-rewrite';
+
+	/**
 	 * Build the list of candidate fields from a walker inventory.
 	 *
 	 * Each candidate has enough information to (a) preview to the user,
@@ -66,6 +77,13 @@ final class Rewrite_Engine {
 				continue;
 			}
 			if ( self::has_managed_class( (string) ( $node['class'] ?? '' ) ) ) {
+				continue;
+			}
+			// Honor the user-applied opt-out class. Walks own + ancestor
+			// classes (the walker concatenates them into ancestor_classes)
+			// so dropping ehbp-no-rewrite on a row excludes everything
+			// inside that row.
+			if ( self::has_no_rewrite_class( (string) ( $node['ancestor_classes'] ?? $node['class'] ?? '' ) ) ) {
 				continue;
 			}
 			foreach ( $node['fields'] ?? array() as $field ) {
@@ -192,7 +210,11 @@ final class Rewrite_Engine {
 				)
 			);
 
-			$response = $client->chat( $messages['user'], $messages['system'], 30 );
+			// Temperature 0.6 gives the model enough headroom to vary
+			// sentence structure and word choice across cloned pages
+			// (so 80 cities don't all read identically), while still
+			// being conservative enough that it sticks to the facts.
+			$response = $client->chat( $messages['user'], $messages['system'], 30, 0.6 );
 
 			if ( $response instanceof WP_Error ) {
 				$candidates[ $i ]['suggestion'] = '';
@@ -267,6 +289,14 @@ final class Rewrite_Engine {
 			}
 		}
 		return false;
+	}
+
+	private static function has_no_rewrite_class( string $class_attr ): bool {
+		if ( '' === $class_attr ) {
+			return false;
+		}
+		$tokens = preg_split( '/\s+/', trim( $class_attr ) ) ?: array();
+		return in_array( self::NO_REWRITE_CLASS, $tokens, true );
 	}
 
 	/**
