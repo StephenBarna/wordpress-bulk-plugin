@@ -30,6 +30,7 @@ final class Plugin {
 			Admin\Inspect_Screen::register();
 			Admin\Patch_Screen::register();
 			Admin\Leak_Scanner_Screen::register();
+			Admin\Coverage_Screen::register();
 		}
 	}
 

@@ -566,6 +566,29 @@ final class Image_Pipeline {
 	 *
 	 * @return int|WP_Error New attachment ID.
 	 */
+	/**
+	 * Public wrapper around the otherwise-private file copy helper, so
+	 * other engines (notably Patch_Engine's image cloning pass) can
+	 * reuse the same year/month placement, collision-resolution, and
+	 * `_ehbp_cloned_attachment` stamping.
+	 *
+	 * @return int|\WP_Error New attachment ID on success.
+	 */
+	public static function sideload_attachment_copy( int $source_id, string $source_path, string $new_filename, int $parent_post_id ) {
+		return self::sideload_copy( $source_id, $source_path, $new_filename, $parent_post_id );
+	}
+
+	/**
+	 * Public wrapper around the BB photo-data builder. Patch engine
+	 * needs to swap a photo module's `data` blob to reflect a new
+	 * attachment after sideloading; this returns the same shape BB
+	 * would have generated had the user picked the new attachment in
+	 * the editor.
+	 */
+	public static function get_photo_data_object( int $attachment_id ) {
+		return self::build_photo_data_object( $attachment_id );
+	}
+
 	private static function sideload_copy( int $source_id, string $source_path, string $new_filename, int $parent_post_id ) {
 		require_once ABSPATH . 'wp-admin/includes/image.php';
 		require_once ABSPATH . 'wp-admin/includes/file.php';

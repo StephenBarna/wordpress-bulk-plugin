@@ -145,6 +145,18 @@ final class Patch_Screen {
 						</td>
 					</tr>
 					<tr>
+						<th scope="row"><?php esc_html_e( 'Image cloning', 'earthhaul-bulk-pages' ); ?></th>
+						<td>
+							<label>
+								<input type="checkbox" name="ehbp_patch_clone_images" value="1" checked>
+								<?php esc_html_e( 'Sideload each photo as a target-localized attachment (rename + dedup, no AI)', 'earthhaul-bulk-pages' ); ?>
+							</label>
+							<p class="description">
+								<?php esc_html_e( 'When enabled, every photo in the patched row gets a fresh copy in the media library with the source city slug in its filename swapped for the target city ("…orlando.jpg" -> "…winter-haven.jpg"). Alt text and titles are localized via simple substitution. Re-runs reuse existing clones for the same source+target combo, so it is safe to run repeatedly. Turn off if your patched row uses generic icons that should not be city-specific.', 'earthhaul-bulk-pages' ); ?>
+							</p>
+						</td>
+					</tr>
+					<tr>
 						<th scope="row"><?php esc_html_e( 'Target pages', 'earthhaul-bulk-pages' ); ?></th>
 						<td>
 							<?php self::render_target_picker(); ?>
@@ -203,31 +215,95 @@ final class Patch_Screen {
 			echo '<p style="color:#646970;"><em>' . esc_html__( 'No cloned pages yet. Run a New Job first.', 'earthhaul-bulk-pages' ) . '</em></p>';
 			return;
 		}
+
+		$location_count = 0;
+		$service_count  = 0;
+		$manual_count   = 0;
+		foreach ( $rows as $r ) {
+			if ( 'location' === ( $r['kind'] ?? '' ) ) {
+				$location_count++;
+			} else {
+				$service_count++;
+			}
+			if ( 'manual' === ( $r['source'] ?? '' ) ) {
+				$manual_count++;
+			}
+		}
 		?>
-		<div style="margin-bottom:8px;">
+		<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
 			<label>
-				<input type="checkbox" id="ehbp-patch-select-all"
-					onclick="var b=this.checked;document.querySelectorAll('input[name=\'ehbp_patch_targets[]\']').forEach(function(c){c.checked=b;});" checked>
+				<strong><?php esc_html_e( 'Show:', 'earthhaul-bulk-pages' ); ?></strong>
+				<select id="ehbp-patch-kind-filter">
+					<option value="location" selected>
+						<?php
+						printf(
+							/* translators: %d: count of location pages */
+							esc_html__( 'Locations only (%d)', 'earthhaul-bulk-pages' ),
+							(int) $location_count
+						);
+						?>
+					</option>
+					<option value="service">
+						<?php
+						printf(
+							/* translators: %d: count of service sub-pages */
+							esc_html__( 'Service sub-pages only (%d)', 'earthhaul-bulk-pages' ),
+							(int) $service_count
+						);
+						?>
+					</option>
+					<option value="all">
+						<?php
+						printf(
+							/* translators: %d: total cloned pages */
+							esc_html__( 'All pages under /locations/ (%d)', 'earthhaul-bulk-pages' ),
+							(int) ( $location_count + $service_count )
+						);
+						?>
+					</option>
+				</select>
+			</label>
+			<label>
+				<input type="checkbox" id="ehbp-patch-select-all" checked>
+				<span id="ehbp-patch-select-all-label">
+					<?php esc_html_e( 'Select all visible', 'earthhaul-bulk-pages' ); ?>
+				</span>
+			</label>
+			<span id="ehbp-patch-selected-count" style="color:#646970;"></span>
+		</div>
+		<?php if ( $manual_count > 0 ) : ?>
+			<p style="color:#646970;font-size:12px;margin:0 0 8px;">
 				<?php
 				printf(
-					/* translators: %d: count */
-					esc_html__( 'Select all %d cloned pages', 'earthhaul-bulk-pages' ),
-					count( $rows )
+					/* translators: %d: count of manually-authored pages found */
+					esc_html__( '%d pages in the list are hand-built (no plugin meta). They will be patched the same way, but for the patch to find an insertion anchor on each one, you may need to add the anchor class (e.g. ehbp-neighborhoods) to a row, column, or module on each hand-built page.', 'earthhaul-bulk-pages' ),
+					(int) $manual_count
 				);
 				?>
-			</label>
-		</div>
-		<div style="max-height:320px;overflow:auto;border:1px solid #c3c4c7;padding:10px;background:#fff;">
+			</p>
+		<?php endif; ?>
+		<div id="ehbp-patch-target-box" style="max-height:320px;overflow:auto;border:1px solid #c3c4c7;padding:10px;background:#fff;">
 			<?php foreach ( $rows as $row ) :
 				$post_id = (int) $row['ID'];
 				$title   = (string) $row['post_title'];
 				$slug    = (string) $row['post_name'];
 				$status  = (string) $row['post_status'];
+				$kind    = (string) ( $row['kind'] ?? '' );
+				$source  = (string) ( $row['source'] ?? '' );
 				$city    = trim( (string) $row['city_name'] . ( '' !== (string) $row['state'] ? ', ' . $row['state'] : '' ), ', ' );
+				$default_checked = 'location' === $kind;
+				$kind_bg = 'location' === $kind ? '#e0f7e9' : '#fff4d6';
+				$src_bg  = 'cloned'   === $source ? '#e1eaff' : '#f3e3ff';
 				?>
-				<label style="display:block;margin:2px 0;">
-					<input type="checkbox" name="ehbp_patch_targets[]" value="<?php echo (int) $post_id; ?>" checked>
+				<label class="ehbp-patch-row" data-kind="<?php echo esc_attr( $kind ); ?>" data-source="<?php echo esc_attr( $source ); ?>" style="display:block;margin:2px 0;">
+					<input type="checkbox" name="ehbp_patch_targets[]" value="<?php echo (int) $post_id; ?>" <?php checked( $default_checked ); ?>>
 					<strong><?php echo esc_html( $title ); ?></strong>
+					<span style="color:#3c434a;font-size:11px;margin-left:6px;padding:1px 6px;border-radius:9px;background:<?php echo esc_attr( $kind_bg ); ?>;">
+						<?php echo esc_html( ucfirst( $kind ) ); ?>
+					</span>
+					<span style="color:#3c434a;font-size:11px;margin-left:4px;padding:1px 6px;border-radius:9px;background:<?php echo esc_attr( $src_bg ); ?>;">
+						<?php echo 'cloned' === $source ? esc_html__( 'Cloned', 'earthhaul-bulk-pages' ) : esc_html__( 'Hand-built', 'earthhaul-bulk-pages' ); ?>
+					</span>
 					<span style="color:#646970;">
 						(#<?php echo (int) $post_id; ?>,
 						<code><?php echo esc_html( $slug ); ?></code>,
@@ -240,12 +316,78 @@ final class Patch_Screen {
 				</label>
 			<?php endforeach; ?>
 		</div>
+		<script>
+		(function () {
+			var box       = document.getElementById('ehbp-patch-target-box');
+			var rows      = box.querySelectorAll('.ehbp-patch-row');
+			var filter    = document.getElementById('ehbp-patch-kind-filter');
+			var selectAll = document.getElementById('ehbp-patch-select-all');
+			var counter   = document.getElementById('ehbp-patch-selected-count');
+
+			function applyFilter() {
+				var want = filter.value; // 'location' | 'service' | 'all'
+				rows.forEach(function (row) {
+					var kind = row.getAttribute('data-kind');
+					var show = (want === 'all' || kind === want);
+					row.style.display = show ? '' : 'none';
+					var cb = row.querySelector('input[type=checkbox]');
+					// Hidden rows MUST be unchecked so the form does not
+					// submit selections the user can no longer see.
+					if (!show && cb) {
+						cb.checked = false;
+					}
+				});
+				updateCount();
+			}
+
+			function updateCount() {
+				var total   = 0;
+				var checked = 0;
+				rows.forEach(function (row) {
+					if (row.style.display === 'none') { return; }
+					total++;
+					var cb = row.querySelector('input[type=checkbox]');
+					if (cb && cb.checked) { checked++; }
+				});
+				counter.textContent = checked + ' / ' + total + ' selected';
+			}
+
+			selectAll.addEventListener('change', function () {
+				var b = this.checked;
+				rows.forEach(function (row) {
+					if (row.style.display === 'none') { return; }
+					var cb = row.querySelector('input[type=checkbox]');
+					if (cb) { cb.checked = b; }
+				});
+				updateCount();
+			});
+
+			filter.addEventListener('change', applyFilter);
+			box.addEventListener('change', updateCount);
+
+			applyFilter(); // Initial render: locations-only is selected
+		})();
+		</script>
 		<?php
 	}
 
 	/**
-	 * Pull cloned pages with their city/state meta for the picker. Same
-	 * shape as the Manage Cloned Pages table.
+	 * Pull every location & service page on the site, regardless of
+	 * whether it was plugin-cloned or hand-built. Returns rows with
+	 * `kind` (location | service) and `source` (cloned | manual)
+	 * so the picker can group + badge them.
+	 *
+	 * Detection rule (parent-based, no plugin meta required):
+	 *   - location: post_parent's slug is `locations` (direct child
+	 *     of the top-level Locations page).
+	 *   - service:  grandchild of the Locations page (post_parent's
+	 *     post_parent slug is `locations`). In practice these are
+	 *     Concrete / Landscaping / Moving sub-pages parented to a
+	 *     location page.
+	 *
+	 * Source flag is informational only: it lights up the "Cloned"
+	 * vs "Hand-built" badge so the user knows whether the page
+	 * carries plugin meta (`_ehbp_source_post_id`).
 	 *
 	 * @return array<int, array<string, string>>
 	 */
@@ -260,22 +402,45 @@ final class Patch_Screen {
 					p.post_title,
 					p.post_name,
 					p.post_status,
-					COALESCE(mc.meta_value, '') AS city_name,
-					COALESCE(ms.meta_value, '') AS state
+					p.post_parent,
+					COALESCE(parent.post_name, '')        AS parent_slug,
+					COALESCE(grandparent.post_name, '')   AS grandparent_slug,
+					COALESCE(mc.meta_value, '')           AS city_name,
+					COALESCE(ms.meta_value, '')           AS state,
+					COALESCE(src.meta_value, '')          AS source_post_id
 				FROM {$wpdb->posts} p
-				INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = %s
-				LEFT JOIN {$wpdb->postmeta} mc ON mc.post_id = p.ID AND mc.meta_key = %s
-				LEFT JOIN {$wpdb->postmeta} ms ON ms.post_id = p.ID AND ms.meta_key = %s
-				WHERE p.post_status IN ('publish','draft','private','pending','future')
-				ORDER BY p.post_title ASC
+				LEFT JOIN {$wpdb->posts}    parent       ON parent.ID = p.post_parent
+				LEFT JOIN {$wpdb->posts}    grandparent  ON grandparent.ID = parent.post_parent
+				LEFT JOIN {$wpdb->postmeta} mc  ON mc.post_id  = p.ID AND mc.meta_key  = %s
+				LEFT JOIN {$wpdb->postmeta} ms  ON ms.post_id  = p.ID AND ms.meta_key  = %s
+				LEFT JOIN {$wpdb->postmeta} src ON src.post_id = p.ID AND src.meta_key = %s
+				WHERE p.post_type = 'page'
+				  AND p.post_status IN ('publish','draft','private','pending','future')
+				  AND (
+					parent.post_name = 'locations'
+					OR grandparent.post_name = 'locations'
+				  )
+				ORDER BY parent.post_name ASC, p.post_title ASC
 				",
-				'_ehbp_source_post_id',
 				'_ehbp_city_name',
-				'_ehbp_state'
+				'_ehbp_state',
+				'_ehbp_source_post_id'
 			),
 			ARRAY_A
 		);
-		return is_array( $rows ) ? $rows : array();
+
+		if ( ! is_array( $rows ) ) {
+			return array();
+		}
+
+		foreach ( $rows as &$r ) {
+			$parent_slug = strtolower( (string) ( $r['parent_slug'] ?? '' ) );
+			$r['kind']   = ( 'locations' === $parent_slug ) ? 'location' : 'service';
+			$r['source'] = '' !== (string) ( $r['source_post_id'] ?? '' ) ? 'cloned' : 'manual';
+		}
+		unset( $r );
+
+		return $rows;
 	}
 
 	/**
@@ -314,6 +479,7 @@ final class Patch_Screen {
 		$anchor_class  = isset( $_POST['ehbp_patch_anchor_class'] )
 			? sanitize_text_field( wp_unslash( (string) $_POST['ehbp_patch_anchor_class'] ) )
 			: '';
+		$clone_images  = ! empty( $_POST['ehbp_patch_clone_images'] );
 		$targets_raw   = isset( $_POST['ehbp_patch_targets'] ) && is_array( $_POST['ehbp_patch_targets'] )
 			? wp_unslash( (array) $_POST['ehbp_patch_targets'] )
 			: array();
@@ -346,6 +512,7 @@ final class Patch_Screen {
 			'marker_class'   => $marker_class,
 			'insertion_rule' => $rule,
 			'anchor_class'   => $anchor_class,
+			'clone_images'   => $clone_images,
 			'targets'        => $targets,
 			'progress'       => array(
 				'index'     => 0,
@@ -488,6 +655,7 @@ final class Patch_Screen {
 				'marker_class'   => (string) $state['marker_class'],
 				'insertion_rule' => (string) $state['insertion_rule'],
 				'anchor_class'   => (string) $state['anchor_class'],
+				'clone_images'   => (bool) ( $state['clone_images'] ?? true ),
 			)
 		);
 		$elapsed = round( microtime( true ) - $started, 2 );

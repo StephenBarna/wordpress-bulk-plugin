@@ -73,6 +73,11 @@ final class Patch_Engine {
 	 *                                   Default 'append'.
 	 *     @type string $anchor_class    Required for before_anchor/after_anchor; CSS class on a target row
 	 *                                   used as the insertion anchor.
+	 *     @type bool   $clone_images    When true, sideload each photo module's
+	 *                                   image as a target-localized attachment
+	 *                                   (rename + alt text + dedup). Default
+	 *                                   true. Set false to keep the source
+	 *                                   page's attachments referenced as-is.
 	 * }
 	 * @return array{ok: bool, count: int, message: string, mode: string}
 	 */
@@ -80,6 +85,7 @@ final class Patch_Engine {
 		$marker_class = (string) ( $config['marker_class'] ?? self::DEFAULT_MARKER_CLASS );
 		$rule         = (string) ( $config['insertion_rule'] ?? 'append' );
 		$anchor_class = (string) ( $config['anchor_class'] ?? '' );
+		$clone_images = ! isset( $config['clone_images'] ) || (bool) $config['clone_images'];
 
 		if ( ! class_exists( '\FLBuilderModel' ) ) {
 			return self::result( false, 0, 'Beaver Builder is not active.', $rule );
@@ -203,6 +209,21 @@ final class Patch_Engine {
 					self::swap_source_slug_in_place( $node->settings, $source_pair, $target_pair );
 				}
 				self::diff_capture_phase( $node->settings, $node_id, 'after_slug_swap', $debug_lines );
+			}
+
+			// Image localization pass: sideload each photo module's
+			// source attachment as a target-localized clone, and rewrite
+			// the photo module's id/url/data to point at the new
+			// attachment. No-op when clone_images is false (config flag)
+			// or when source/target share a city slug.
+			if ( $clone_images ) {
+				Patch_Image_Cloner::localize_photos_in_subtree(
+					$subtree,
+					$source_pair,
+					$target_pair,
+					$target_post_id,
+					$debug_lines
+				);
 			}
 
 			$target_layout = self::insert_subtree(

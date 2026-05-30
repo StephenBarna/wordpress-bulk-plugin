@@ -100,6 +100,15 @@ final class Admin_Menu {
 
 		add_submenu_page(
 			self::MENU_SLUG,
+			__( 'Coverage Audit', 'earthhaul-bulk-pages' ),
+			__( 'Coverage Audit', 'earthhaul-bulk-pages' ),
+			self::CAPABILITY,
+			Coverage_Screen::PAGE_SLUG,
+			array( Coverage_Screen::class, 'render' )
+		);
+
+		add_submenu_page(
+			self::MENU_SLUG,
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			self::CAPABILITY,
