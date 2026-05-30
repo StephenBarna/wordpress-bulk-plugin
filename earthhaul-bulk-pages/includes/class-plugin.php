@@ -29,6 +29,7 @@ final class Plugin {
 			Admin\New_Job_Screen::register();
 			Admin\Inspect_Screen::register();
 			Admin\Patch_Screen::register();
+			Admin\Leak_Scanner_Screen::register();
 		}
 	}
 

@@ -13,20 +13,33 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Admin_Menu {
 
-	public const MENU_SLUG          = 'ehbp-bulk-pages';
-	public const SETTINGS_PAGE_SLUG = 'ehbp-settings';
-	public const NEW_JOB_PAGE_SLUG  = 'ehbp-new-job';
-	public const INSPECT_PAGE_SLUG  = 'ehbp-inspect';
-	public const CAPABILITY         = 'manage_options';
-	public const RESET_ACTION       = 'ehbp_reset_drafts';
-	public const PUBLISH_ACTION     = 'ehbp_publish_drafts';
-	public const BULK_ACTION        = 'ehbp_bulk_clones';
+	public const MENU_SLUG            = 'ehbp-bulk-pages';
+	public const SETTINGS_PAGE_SLUG   = 'ehbp-settings';
+	public const NEW_JOB_PAGE_SLUG    = 'ehbp-new-job';
+	public const INSPECT_PAGE_SLUG    = 'ehbp-inspect';
+	public const CAPABILITY           = 'manage_options';
+	public const RESET_ACTION         = 'ehbp_reset_drafts';
+	public const PUBLISH_ACTION       = 'ehbp_publish_drafts';
+	public const BULK_ACTION          = 'ehbp_bulk_clones';
+	public const DASH_AJAX_STEP       = 'ehbp_dash_step';
+	private const DASH_JOB_TRANSIENT  = 'ehbp_dash_job_';
+	private const DASH_JOB_QUERY_PARAM = 'ehbp_dash_job';
+
+	/**
+	 * How many posts each AJAX chunk processes before returning to the
+	 * browser. Keep small enough that web-server / WAF timeouts cannot
+	 * fire mid-chunk - each iteration triggers Yoast post-save hooks,
+	 * sitemap rebuilds, and (for delete) cascade attachment removal,
+	 * any of which can be slow on a busy host.
+	 */
+	private const DASH_CHUNK_SIZE     = 8;
 
 	public static function register(): void {
 		add_action( 'admin_menu', array( self::class, 'add_menu' ) );
 		add_action( 'admin_post_' . self::RESET_ACTION, array( self::class, 'handle_reset' ) );
 		add_action( 'admin_post_' . self::PUBLISH_ACTION, array( self::class, 'handle_publish_drafts' ) );
 		add_action( 'admin_post_' . self::BULK_ACTION, array( self::class, 'handle_bulk_action' ) );
+		add_action( 'wp_ajax_' . self::DASH_AJAX_STEP, array( self::class, 'handle_ajax_step' ) );
 	}
 
 	public static function add_menu(): void {
@@ -78,6 +91,15 @@ final class Admin_Menu {
 
 		add_submenu_page(
 			self::MENU_SLUG,
+			__( 'Find Leaks', 'earthhaul-bulk-pages' ),
+			__( 'Find Leaks', 'earthhaul-bulk-pages' ),
+			self::CAPABILITY,
+			Leak_Scanner_Screen::PAGE_SLUG,
+			array( Leak_Scanner_Screen::class, 'render' )
+		);
+
+		add_submenu_page(
+			self::MENU_SLUG,
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			__( 'Settings', 'earthhaul-bulk-pages' ),
 			self::CAPABILITY,
@@ -87,6 +109,21 @@ final class Admin_Menu {
 	}
 
 	public static function render_dashboard(): void {
+		// Dashboard-level chunked job in flight (publish / draft / delete /
+		// reset). Hand off rendering to the progress UI so the user can
+		// watch the chunked AJAX runner finish before the regular dashboard
+		// re-renders with updated counts.
+		$active_job_id = isset( $_GET[ self::DASH_JOB_QUERY_PARAM ] )
+			? sanitize_key( wp_unslash( (string) $_GET[ self::DASH_JOB_QUERY_PARAM ] ) )
+			: '';
+		if ( '' !== $active_job_id ) {
+			$state = self::load_job_state( $active_job_id );
+			if ( ! empty( $state ) ) {
+				self::render_progress( $active_job_id, $state );
+				return;
+			}
+		}
+
 		$settings_url = admin_url( 'admin.php?page=' . self::SETTINGS_PAGE_SLUG );
 		$new_job_url  = admin_url( 'admin.php?page=' . self::NEW_JOB_PAGE_SLUG );
 
@@ -380,9 +417,16 @@ final class Admin_Menu {
 	}
 
 	/**
-	 * Bulk-publish every cloned draft. Drafts only - already-published
-	 * pages stay published. Uses wp_update_post so post_modified updates
-	 * and Yoast / sitemap pickups happen normally.
+	 * Stager for the "Publish all cloned drafts" button. Collects every
+	 * cloned-draft post ID, persists a job record in a transient, then
+	 * redirects back to the dashboard with the job ID in the query
+	 * string so render_dashboard() hands off to render_progress() which
+	 * drives a chunked AJAX loop until done.
+	 *
+	 * Handling 100+ wp_update_post calls in a single PHP request blew
+	 * out the SiteGround 120s proxy timeout (and Yoast / sitemap hooks
+	 * push memory toward the 256 MB cap). Chunking moves the work into
+	 * batches the browser drives.
 	 */
 	public static function handle_publish_drafts(): void {
 		if ( ! current_user_can( self::CAPABILITY ) ) {
@@ -391,7 +435,7 @@ final class Admin_Menu {
 		check_admin_referer( self::PUBLISH_ACTION );
 
 		global $wpdb;
-		$ids = $wpdb->get_col(
+		$ids = (array) $wpdb->get_col(
 			"
 			SELECT DISTINCT pm.post_id
 			FROM {$wpdb->postmeta} pm
@@ -400,54 +444,33 @@ final class Admin_Menu {
 			  AND p.post_status = 'draft'
 			"
 		);
+		$ids = array_values( array_filter( array_map( 'intval', $ids ), static fn ( int $id ): bool => $id > 0 ) );
 
-		// Long batches are possible (~hundreds of posts). Drop the time
-		// limit so wp_update_post + Yoast post-save hooks have room.
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-		}
-
-		$published = 0;
-		$failed    = 0;
-		foreach ( $ids as $id ) {
-			$result = wp_update_post(
-				array(
-					'ID'          => (int) $id,
-					'post_status' => 'publish',
-				),
-				true
+		if ( empty( $ids ) ) {
+			add_settings_error(
+				'ehbp_dashboard',
+				'ehbp_publish_noop',
+				__( 'No cloned drafts to publish.', 'earthhaul-bulk-pages' ),
+				'info'
 			);
-			if ( is_wp_error( $result ) || 0 === (int) $result ) {
-				$failed++;
-				continue;
-			}
-			$published++;
+			set_transient( 'settings_errors', get_settings_errors(), 30 );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+			exit;
 		}
 
-		add_settings_error(
-			'ehbp_dashboard',
-			'ehbp_publish_done',
-			sprintf(
-				/* translators: 1: published count, 2: failed count */
-				__( 'Publish complete. Published %1$d cloned drafts. %2$d failed.', 'earthhaul-bulk-pages' ),
-				$published,
-				$failed
-			),
-			'success'
-		);
-		set_transient( 'settings_errors', get_settings_errors(), 30 );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+		$job_id = self::stage_job( 'publish', $ids );
+		wp_safe_redirect( self::dashboard_url_for_job( $job_id ) );
 		exit;
 	}
 
 	/**
-	 * Apply a bulk operation (delete / publish / draft) to the post IDs
-	 * the user ticked in the Manage cloned pages table.
+	 * Stager for the table-driven Manage cloned pages bulk action
+	 * (delete / publish / draft). Validates input, gates the IDs to our
+	 * cloned posts only, persists a job record, then hands off to the
+	 * chunked AJAX runner.
 	 *
-	 * Hard-gated to IDs that actually carry our `_ehbp_source_post_id`
-	 * meta marker so a tampered form can't be used to delete unrelated
-	 * pages.
+	 * Hard-gated to IDs that carry our `_ehbp_source_post_id` meta
+	 * marker so a tampered form can't be used to delete unrelated pages.
 	 */
 	public static function handle_bulk_action(): void {
 		if ( ! current_user_can( self::CAPABILITY ) ) {
@@ -474,66 +497,20 @@ final class Admin_Menu {
 		}
 
 		$ids = self::filter_to_cloned_only( $ids );
-
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		if ( empty( $ids ) ) {
+			add_settings_error(
+				'ehbp_dashboard',
+				'ehbp_bulk_noop',
+				__( 'None of the selected post IDs correspond to a plugin-cloned page. Aborting.', 'earthhaul-bulk-pages' ),
+				'error'
+			);
+			set_transient( 'settings_errors', get_settings_errors(), 30 );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+			exit;
 		}
 
-		$ok       = 0;
-		$failed   = 0;
-		$att_done = 0;
-
-		foreach ( $ids as $id ) {
-			$result = false;
-			if ( 'delete' === $op ) {
-				$att_done += self::delete_cloned_attachments_for_post( $id );
-				$result   = (bool) wp_delete_post( $id, true );
-			} elseif ( 'publish' === $op ) {
-				$updated = wp_update_post(
-					array( 'ID' => $id, 'post_status' => 'publish' ),
-					true
-				);
-				$result = ! is_wp_error( $updated ) && (int) $updated > 0;
-			} elseif ( 'draft' === $op ) {
-				$updated = wp_update_post(
-					array( 'ID' => $id, 'post_status' => 'draft' ),
-					true
-				);
-				$result = ! is_wp_error( $updated ) && (int) $updated > 0;
-			}
-			$result ? $ok++ : $failed++;
-		}
-
-		$verb = array(
-			'delete'  => __( 'Deleted', 'earthhaul-bulk-pages' ),
-			'publish' => __( 'Published', 'earthhaul-bulk-pages' ),
-			'draft'   => __( 'Reverted to draft', 'earthhaul-bulk-pages' ),
-		)[ $op ];
-
-		$att_note = ( 'delete' === $op && $att_done > 0 )
-			? ' ' . sprintf(
-				/* translators: %d: attachment count */
-				__( 'Also removed %d sideloaded image(s).', 'earthhaul-bulk-pages' ),
-				$att_done
-			)
-			: '';
-
-		add_settings_error(
-			'ehbp_dashboard',
-			'ehbp_bulk_done',
-			sprintf(
-				/* translators: 1: action verb, 2: ok count, 3: failed count, 4: optional attachment note */
-				__( '%1$s %2$d cloned page(s). %3$d failed.%4$s', 'earthhaul-bulk-pages' ),
-				$verb,
-				$ok,
-				$failed,
-				$att_note
-			),
-			'success'
-		);
-		set_transient( 'settings_errors', get_settings_errors(), 30 );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+		$job_id = self::stage_job( $op, $ids );
+		wp_safe_redirect( self::dashboard_url_for_job( $job_id ) );
 		exit;
 	}
 
@@ -611,42 +588,316 @@ final class Admin_Menu {
 		check_admin_referer( self::RESET_ACTION );
 
 		global $wpdb;
-		$ids = $wpdb->get_col(
+		$ids = (array) $wpdb->get_col(
 			"
 			SELECT DISTINCT post_id
 			FROM {$wpdb->postmeta}
 			WHERE meta_key = '_ehbp_source_post_id'
 			"
 		);
+		$ids = array_values( array_filter( array_map( 'intval', $ids ), static fn ( int $id ): bool => $id > 0 ) );
 
-		$deleted  = 0;
-		$failed   = 0;
-		$att_done = 0;
-		foreach ( $ids as $id ) {
-			$att_done += self::delete_cloned_attachments_for_post( (int) $id );
-			$result   = wp_delete_post( (int) $id, true );
-			if ( $result ) {
-				$deleted++;
-			} else {
-				$failed++;
-			}
+		if ( empty( $ids ) ) {
+			add_settings_error(
+				'ehbp_dashboard',
+				'ehbp_reset_noop',
+				__( 'No cloned pages to delete.', 'earthhaul-bulk-pages' ),
+				'info'
+			);
+			set_transient( 'settings_errors', get_settings_errors(), 30 );
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+			exit;
 		}
 
-		add_settings_error(
-			'ehbp_dashboard',
-			'ehbp_reset_done',
-			sprintf(
-				/* translators: 1: deleted count, 2: failed count, 3: attachment count */
-				__( 'Reset complete. Deleted %1$d cloned pages and %3$d sideloaded image(s). %2$d failed.', 'earthhaul-bulk-pages' ),
-				$deleted,
-				$failed,
-				$att_done
-			),
-			'success'
-		);
-		set_transient( 'settings_errors', get_settings_errors(), 30 );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&settings-updated=true' ) );
+		$job_id = self::stage_job( 'delete', $ids );
+		wp_safe_redirect( self::dashboard_url_for_job( $job_id ) );
 		exit;
+	}
+
+	/* -------------------------------------------------------------------- */
+	/* Chunked AJAX runner for dashboard bulk operations.                   */
+	/* -------------------------------------------------------------------- */
+
+	/**
+	 * Persist a new dashboard job and return its job_id. Job state lives
+	 * in a transient (small-ish: a list of post IDs + counters), keyed
+	 * by `ehbp_dash_job_<id>`. The runner consumes IDs from the
+	 * `remaining` list one chunk at a time until empty.
+	 *
+	 * @param string         $op  publish | draft | delete
+	 * @param array<int,int> $ids Post IDs (already filtered to cloned).
+	 */
+	private static function stage_job( string $op, array $ids ): string {
+		$job_id = 'dj_' . wp_generate_password( 8, false, false );
+		$state  = array(
+			'job_id'              => $job_id,
+			'op'                  => $op,
+			'total'               => count( $ids ),
+			'remaining'           => array_values( $ids ),
+			'ok'                  => 0,
+			'failed'              => 0,
+			'attachments_deleted' => 0,
+			'errors'              => array(),
+			'created_at'          => time(),
+		);
+		self::save_job_state( $job_id, $state );
+		return $job_id;
+	}
+
+	private static function save_job_state( string $job_id, array $state ): void {
+		set_transient( self::DASH_JOB_TRANSIENT . $job_id, $state, HOUR_IN_SECONDS );
+	}
+
+	private static function load_job_state( string $job_id ): array {
+		$state = get_transient( self::DASH_JOB_TRANSIENT . $job_id );
+		return is_array( $state ) ? $state : array();
+	}
+
+	private static function clear_job_state( string $job_id ): void {
+		delete_transient( self::DASH_JOB_TRANSIENT . $job_id );
+	}
+
+	private static function dashboard_url_for_job( string $job_id ): string {
+		return add_query_arg(
+			array(
+				'page'                       => self::MENU_SLUG,
+				self::DASH_JOB_QUERY_PARAM   => $job_id,
+			),
+			admin_url( 'admin.php' )
+		);
+	}
+
+	/**
+	 * AJAX endpoint that processes one chunk (DASH_CHUNK_SIZE post IDs)
+	 * of the staged job and returns the updated state. The browser-side
+	 * loop calls this until `done` is true.
+	 */
+	public static function handle_ajax_step(): void {
+		if ( ! current_user_can( self::CAPABILITY ) ) {
+			wp_send_json_error( array( 'message' => __( 'Forbidden.', 'earthhaul-bulk-pages' ) ), 403 );
+		}
+		check_ajax_referer( self::DASH_AJAX_STEP, 'nonce' );
+
+		$job_id = isset( $_POST['job_id'] ) ? sanitize_key( wp_unslash( (string) $_POST['job_id'] ) ) : '';
+		$state  = self::load_job_state( $job_id );
+		if ( empty( $state ) || empty( $state['op'] ) ) {
+			wp_send_json_error( array( 'message' => __( 'Job not found or already completed.', 'earthhaul-bulk-pages' ) ), 404 );
+		}
+
+		// Process up to DASH_CHUNK_SIZE IDs, then return so the browser
+		// keeps the connection short and within proxy timeout windows.
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+
+		$op    = (string) $state['op'];
+		$batch = array_splice( $state['remaining'], 0, self::DASH_CHUNK_SIZE );
+
+		foreach ( $batch as $id ) {
+			$id = (int) $id;
+			if ( $id <= 0 ) {
+				continue;
+			}
+			$ok = false;
+			try {
+				if ( 'delete' === $op ) {
+					$state['attachments_deleted'] += self::delete_cloned_attachments_for_post( $id );
+					$ok = (bool) wp_delete_post( $id, true );
+				} elseif ( 'publish' === $op ) {
+					$updated = wp_update_post(
+						array( 'ID' => $id, 'post_status' => 'publish' ),
+						true
+					);
+					$ok = ! is_wp_error( $updated ) && (int) $updated > 0;
+					if ( is_wp_error( $updated ) ) {
+						$state['errors'][] = sprintf( '#%d: %s', $id, $updated->get_error_message() );
+					}
+				} elseif ( 'draft' === $op ) {
+					$updated = wp_update_post(
+						array( 'ID' => $id, 'post_status' => 'draft' ),
+						true
+					);
+					$ok = ! is_wp_error( $updated ) && (int) $updated > 0;
+					if ( is_wp_error( $updated ) ) {
+						$state['errors'][] = sprintf( '#%d: %s', $id, $updated->get_error_message() );
+					}
+				}
+			} catch ( \Throwable $e ) {
+				$state['errors'][] = sprintf( '#%d: %s', $id, $e->getMessage() );
+				$ok = false;
+			}
+			$ok ? $state['ok']++ : $state['failed']++;
+		}
+
+		$done = empty( $state['remaining'] );
+		if ( $done ) {
+			// Drop a settings_errors notice for after-redirect display
+			// so the user sees the final summary on the regular dashboard.
+			$verb = array(
+				'delete'  => __( 'Deleted', 'earthhaul-bulk-pages' ),
+				'publish' => __( 'Published', 'earthhaul-bulk-pages' ),
+				'draft'   => __( 'Reverted to draft', 'earthhaul-bulk-pages' ),
+			)[ $op ] ?? __( 'Updated', 'earthhaul-bulk-pages' );
+
+			$att_note = ( 'delete' === $op && $state['attachments_deleted'] > 0 )
+				? ' ' . sprintf(
+					/* translators: %d: attachment count */
+					__( 'Also removed %d sideloaded image(s).', 'earthhaul-bulk-pages' ),
+					(int) $state['attachments_deleted']
+				)
+				: '';
+
+			add_settings_error(
+				'ehbp_dashboard',
+				'ehbp_dash_job_done',
+				sprintf(
+					/* translators: 1: action verb, 2: ok count, 3: failed count, 4: optional attachment note */
+					__( '%1$s %2$d cloned page(s). %3$d failed.%4$s', 'earthhaul-bulk-pages' ),
+					$verb,
+					(int) $state['ok'],
+					(int) $state['failed'],
+					$att_note
+				),
+				'success'
+			);
+			set_transient( 'settings_errors', get_settings_errors(), 30 );
+			self::clear_job_state( $job_id );
+		} else {
+			self::save_job_state( $job_id, $state );
+		}
+
+		$processed = (int) $state['ok'] + (int) $state['failed'];
+		wp_send_json_success(
+			array(
+				'job_id'              => $job_id,
+				'op'                  => $op,
+				'done'                => $done,
+				'total'               => (int) $state['total'],
+				'processed'           => $processed,
+				'ok'                  => (int) $state['ok'],
+				'failed'              => (int) $state['failed'],
+				'attachments_deleted' => (int) $state['attachments_deleted'],
+				'errors'              => array_slice( (array) $state['errors'], -10 ),
+				'percent'             => (int) $state['total'] > 0 ? (int) round( ( $processed / (int) $state['total'] ) * 100 ) : 100,
+			)
+		);
+	}
+
+	/**
+	 * Render the chunked-job progress UI: a heading, a progress bar, a
+	 * counter, a Cancel button, and a JS loop that drives the AJAX
+	 * runner until the job reports done. On done we redirect back to
+	 * the regular dashboard so the user sees the success notice.
+	 */
+	private static function render_progress( string $job_id, array $state ): void {
+		$op = (string) ( $state['op'] ?? '' );
+		$verb = array(
+			'delete'  => __( 'Deleting cloned pages', 'earthhaul-bulk-pages' ),
+			'publish' => __( 'Publishing cloned drafts', 'earthhaul-bulk-pages' ),
+			'draft'   => __( 'Reverting pages to draft', 'earthhaul-bulk-pages' ),
+		)[ $op ] ?? __( 'Processing cloned pages', 'earthhaul-bulk-pages' );
+
+		$processed = (int) $state['ok'] + (int) $state['failed'];
+		$total     = (int) $state['total'];
+		$percent   = $total > 0 ? (int) round( ( $processed / $total ) * 100 ) : 0;
+		$nonce     = wp_create_nonce( self::DASH_AJAX_STEP );
+		$dash_url  = admin_url( 'admin.php?page=' . self::MENU_SLUG );
+		?>
+		<div class="wrap">
+			<h1><?php echo esc_html( $verb ); ?></h1>
+			<p>
+				<strong><?php esc_html_e( 'Job:', 'earthhaul-bulk-pages' ); ?></strong>
+				<code><?php echo esc_html( $job_id ); ?></code>
+				&nbsp;&middot;&nbsp;
+				<?php
+				printf(
+					/* translators: %d: total post count */
+					esc_html__( '%d page(s) total', 'earthhaul-bulk-pages' ),
+					$total
+				);
+				?>
+			</p>
+
+			<div id="ehbp-dash-bar" style="background:#e5e7eb;height:14px;border-radius:4px;overflow:hidden;margin:8px 0;">
+				<div id="ehbp-dash-bar-fill"
+					style="background:#2271b1;height:100%;width:<?php echo (int) $percent; ?>%;transition:width .25s ease-out;"></div>
+			</div>
+			<div id="ehbp-dash-counter" style="font-family:Menlo,monospace;color:#1f2328;">
+				<?php
+				printf(
+					/* translators: 1: processed, 2: total, 3: ok, 4: failed */
+					esc_html__( '%1$d / %2$d processed (%3$d ok, %4$d failed)', 'earthhaul-bulk-pages' ),
+					$processed,
+					$total,
+					(int) $state['ok'],
+					(int) $state['failed']
+				);
+				?>
+			</div>
+
+			<p style="margin-top:16px;">
+				<a href="<?php echo esc_url( $dash_url ); ?>" class="button" id="ehbp-dash-cancel"><?php esc_html_e( 'Cancel and return to dashboard', 'earthhaul-bulk-pages' ); ?></a>
+			</p>
+
+			<p style="color:#646970;font-size:13px;">
+				<?php esc_html_e( 'Keep this tab open and the laptop awake while the job runs. Each chunk processes a small batch so the request completes well within hosting timeouts; the progress bar updates after every chunk.', 'earthhaul-bulk-pages' ); ?>
+			</p>
+
+			<div id="ehbp-dash-errors" style="margin-top:12px;color:#b06000;font-family:Menlo,monospace;font-size:12px;"></div>
+		</div>
+
+		<script>
+		(function () {
+			var jobId    = <?php echo wp_json_encode( $job_id ); ?>;
+			var nonce    = <?php echo wp_json_encode( $nonce ); ?>;
+			var ajaxUrl  = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+			var dashUrl  = <?php echo wp_json_encode( $dash_url . '&settings-updated=true' ); ?>;
+			var bar      = document.getElementById('ehbp-dash-bar-fill');
+			var counter  = document.getElementById('ehbp-dash-counter');
+			var errBox   = document.getElementById('ehbp-dash-errors');
+			var cancel   = document.getElementById('ehbp-dash-cancel');
+			var stopped  = false;
+
+			cancel.addEventListener('click', function () { stopped = true; });
+
+			function step() {
+				if (stopped) { return; }
+				var body = new FormData();
+				body.append('action', '<?php echo esc_js( self::DASH_AJAX_STEP ); ?>');
+				body.append('nonce', nonce);
+				body.append('job_id', jobId);
+
+				fetch(ajaxUrl, { method: 'POST', body: body, credentials: 'same-origin' })
+					.then(function (r) { return r.json(); })
+					.then(function (json) {
+						if (!json || !json.success) {
+							errBox.textContent = (json && json.data && json.data.message) ? json.data.message : 'Step failed.';
+							return;
+						}
+						var d = json.data;
+						bar.style.width = d.percent + '%';
+						counter.textContent = d.processed + ' / ' + d.total + ' processed (' + d.ok + ' ok, ' + d.failed + ' failed)';
+						if (d.errors && d.errors.length) {
+							errBox.innerHTML = d.errors.slice(-5).map(function (e) {
+								return e.replace(/[&<>]/g, function (c) {
+									return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+								});
+							}).join('<br>');
+						}
+						if (d.done) {
+							window.location.href = dashUrl;
+							return;
+						}
+						setTimeout(step, 200);
+					})
+					.catch(function (err) {
+						errBox.textContent = 'Network error: ' + err.message + '. Refresh this page to resume.';
+					});
+			}
+
+			step();
+		})();
+		</script>
+		<?php
 	}
 }

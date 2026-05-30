@@ -37,11 +37,13 @@ final class Patch_Screen {
 	public const RUN_ACTION         = 'ehbp_run_patch_job';
 	public const RUN_NONCE          = 'ehbp_run_patch_job';
 	public const STEP_AJAX_ACTION   = 'ehbp_patch_job_step';
+	public const DEBUG_LOG_ACTION   = 'ehbp_patch_debug_log';
 	public const JOB_STATE_TTL      = HOUR_IN_SECONDS;
 
 	public static function register(): void {
 		add_action( 'admin_post_' . self::RUN_ACTION, array( self::class, 'handle_submit' ) );
 		add_action( 'wp_ajax_' . self::STEP_AJAX_ACTION, array( self::class, 'handle_ajax_step' ) );
+		add_action( 'admin_post_' . self::DEBUG_LOG_ACTION, array( self::class, 'handle_debug_log' ) );
 	}
 
 	/* -------------------------------------------------------------------- */
@@ -70,6 +72,28 @@ final class Patch_Screen {
 
 			<p>
 				<?php esc_html_e( 'Copy a marker-tagged Beaver Builder row (or rows) from a source page onto N selected target pages. Useful for adding a new section to all cloned location pages without re-running the AI text or image pipelines.', 'earthhaul-bulk-pages' ); ?>
+			</p>
+
+			<?php
+			$log_url    = wp_nonce_url( admin_url( 'admin-post.php?action=' . self::DEBUG_LOG_ACTION ), self::DEBUG_LOG_ACTION );
+			$log_exists = self::debug_log_exists();
+			?>
+			<p>
+				<?php if ( $log_exists ) : ?>
+					<a class="button" href="<?php echo esc_url( $log_url ); ?>" target="_blank">
+						<?php esc_html_e( 'View patch debug log', 'earthhaul-bulk-pages' ); ?>
+					</a>
+					<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=' . self::DEBUG_LOG_ACTION . '&clear=1' ), self::DEBUG_LOG_ACTION ) ); ?>">
+						<?php esc_html_e( 'Clear log', 'earthhaul-bulk-pages' ); ?>
+					</a>
+					<span class="description" style="margin-left:8px;color:#646970;">
+						<?php esc_html_e( 'Records every string the engine touched on the most recent run, with before/after values. Useful when output looks wrong.', 'earthhaul-bulk-pages' ); ?>
+					</span>
+				<?php else : ?>
+					<span class="description" style="color:#646970;">
+						<?php esc_html_e( 'No patch debug log yet. Run a patch and a "View debug log" link will appear here.', 'earthhaul-bulk-pages' ); ?>
+					</span>
+				<?php endif; ?>
 			</p>
 
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
@@ -116,8 +140,8 @@ final class Patch_Screen {
 					<tr>
 						<th scope="row"><label for="ehbp_patch_anchor_class"><?php esc_html_e( 'Anchor class', 'earthhaul-bulk-pages' ); ?></label></th>
 						<td>
-							<input type="text" name="ehbp_patch_anchor_class" id="ehbp_patch_anchor_class" class="regular-text" placeholder="ehbp-anchor-services">
-							<p class="description"><?php esc_html_e( 'Required for the before/after-anchor rules. CSS class on a row that already exists on every target page; the new row goes immediately before or after it.', 'earthhaul-bulk-pages' ); ?></p>
+							<input type="text" name="ehbp_patch_anchor_class" id="ehbp_patch_anchor_class" class="regular-text" placeholder="ehbp-neighborhoods">
+							<p class="description"><?php esc_html_e( 'Required for the before/after-anchor rules. CSS class on a row, column, or module that already exists on every target page; the new row goes immediately before or after the row that contains it. You can reuse classes you applied during the bulk-clone run (e.g. "ehbp-neighborhoods" on the neighborhoods text module).', 'earthhaul-bulk-pages' ); ?></p>
 						</td>
 					</tr>
 					<tr>
@@ -362,6 +386,14 @@ final class Patch_Screen {
 			&middot; <strong><?php esc_html_e( 'Rule:', 'earthhaul-bulk-pages' ); ?></strong> <?php echo esc_html( (string) $state['insertion_rule'] ); ?>
 			&middot; <strong><?php esc_html_e( 'Marker:', 'earthhaul-bulk-pages' ); ?></strong> <code><?php echo esc_html( (string) $state['marker_class'] ); ?></code>
 		</p>
+		<p>
+			<a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) ); ?>">
+				&larr; <?php esc_html_e( 'Back to form', 'earthhaul-bulk-pages' ); ?>
+			</a>
+			<a class="button" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=' . self::DEBUG_LOG_ACTION ), self::DEBUG_LOG_ACTION ) ); ?>" target="_blank">
+				<?php esc_html_e( 'View patch debug log', 'earthhaul-bulk-pages' ); ?>
+			</a>
+		</p>
 		<div id="ehbp-patch-progress" style="background:#e5e5e5;height:24px;border-radius:4px;overflow:hidden;margin:8px 0;">
 			<div id="ehbp-patch-progress-bar" style="width:0%;height:100%;background:#2271b1;transition:width .3s;"></div>
 		</div>
@@ -517,5 +549,60 @@ final class Patch_Screen {
 			add_settings_error( 'ehbp_patch', 'ehbp_patch_err', (string) $msg, 'error' );
 		}
 		set_transient( 'settings_errors', get_settings_errors(), 30 );
+	}
+
+	/* -------------------------------------------------------------------- */
+	/* Debug log                                                             */
+	/* -------------------------------------------------------------------- */
+
+	private static function debug_log_path(): string {
+		$uploads = wp_upload_dir();
+		if ( empty( $uploads['basedir'] ) || ! is_string( $uploads['basedir'] ) ) {
+			return '';
+		}
+		return trailingslashit( $uploads['basedir'] ) . 'ehbp-patch-debug.log';
+	}
+
+	private static function debug_log_exists(): bool {
+		$path = self::debug_log_path();
+		return '' !== $path && file_exists( $path );
+	}
+
+	/**
+	 * Stream the patch debug log as plain text in the browser. The log
+	 * lists every string field the engine touched on the most recent
+	 * apply() calls, before/after each substitution phase, so the user
+	 * can pinpoint where unexpected output came from.
+	 *
+	 * Also supports clearing via ?clear=1.
+	 */
+	public static function handle_debug_log(): void {
+		if ( ! current_user_can( Admin_Menu::CAPABILITY ) ) {
+			wp_die( esc_html__( 'You do not have permission to do that.', 'earthhaul-bulk-pages' ) );
+		}
+		check_admin_referer( self::DEBUG_LOG_ACTION );
+
+		$path = self::debug_log_path();
+		if ( '' === $path ) {
+			wp_die( esc_html__( 'Uploads directory is unavailable.', 'earthhaul-bulk-pages' ) );
+		}
+
+		if ( isset( $_GET['clear'] ) ) {
+			if ( file_exists( $path ) ) {
+				@unlink( $path );
+			}
+			wp_safe_redirect( admin_url( 'admin.php?page=' . self::PAGE_SLUG ) );
+			exit;
+		}
+
+		if ( ! file_exists( $path ) ) {
+			wp_die( esc_html__( 'No patch debug log on disk yet.', 'earthhaul-bulk-pages' ) );
+		}
+
+		nocache_headers();
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		header( 'Content-Length: ' . filesize( $path ) );
+		readfile( $path );
+		exit;
 	}
 }

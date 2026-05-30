@@ -3,7 +3,7 @@
  * Plugin Name:       EarthHaul Bulk Pages
  * Plugin URI:        https://github.com/StephenBarna/wordpress-bulk-plugin
  * Description:       Bulk-clones a Beaver Builder template into many city + service-location pages, with AI-generated content, image rewrites, and SEO meta.
- * Version:           0.1.4
+ * Version:           0.1.14
  * Requires at least: 6.0
  * Requires PHP:      8.0
  * Author:            Sky Compass Media
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'EHBP_VERSION', '0.1.4' );
+define( 'EHBP_VERSION', '0.1.14' );
 define( 'EHBP_PLUGIN_FILE', __FILE__ );
 define( 'EHBP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'EHBP_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -45,5 +45,6 @@ require_once EHBP_PLUGIN_DIR . 'includes/admin/class-settings-page.php';
 require_once EHBP_PLUGIN_DIR . 'includes/admin/class-new-job-screen.php';
 require_once EHBP_PLUGIN_DIR . 'includes/admin/class-inspect-screen.php';
 require_once EHBP_PLUGIN_DIR . 'includes/admin/class-patch-screen.php';
+require_once EHBP_PLUGIN_DIR . 'includes/admin/class-leak-scanner-screen.php';
 
 add_action( 'plugins_loaded', array( '\EarthHaul\BulkPages\Plugin', 'instance' ) );
